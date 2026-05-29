@@ -22,17 +22,26 @@ const HOVER_DELAY_MS = 2000;
 
 export function MessageList({ lines, nicknames, onReply }: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
-  const [stickToBottom, setStickToBottom] = useState(true);
+  const innerRef = useRef<HTMLDivElement>(null);
+  // Intent-driven autoscroll. `pinned` is the user's stated preference:
+  // true = "I want to follow new messages", false = "I'm reading history,
+  // don't yank me down". It is updated only when the user actively scrolls.
+  // Programmatic scrolling we do ourselves never flips this state.
+  const pinnedRef = useRef(true);
+  const [pinned, setPinned] = useState(true);
   const [tooltip, setTooltip] = useState<{ y: number; text: string } | null>(null);
-  // Count of new lines that arrived while the user was scrolled away from
-  // the bottom. Resets the moment they get back. Surfaced as a small
-  // floating "N new" affordance in the bottom-right.
   const [unread, setUnread] = useState(0);
   const prevLineCountRef = useRef(0);
   // Top-padding pushed onto the scroll container so short content sits at
   // the bottom of the viewport. Recomputed whenever totalSize or viewport
   // height changes.
   const [topPad, setTopPad] = useState(0);
+
+  // Track the most recent scrollHeight we observed. When scrollHeight
+  // grows on its own (e.g. virtualizer measured a tall row after mount),
+  // we want to *not* treat the implied distance-from-bottom change as
+  // "user scrolled up". This ref records the height we last saw / set.
+  const lastScrollHeightRef = useRef(0);
 
   const segments = useMemo(() => {
     const m = new Map<string, MessageSegment[]>();
@@ -52,17 +61,19 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
 
   const totalSize = virtualizer.getTotalSize();
 
+  /** Force the container to its very bottom, bypassing intent state. */
+  const scrollToBottom = () => {
+    const el = parentRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    lastScrollHeightRef.current = el.scrollHeight;
+  };
+
   // Recalculate top padding so the items hug the bottom edge when short.
-  // Using padding (not a sibling spacer) keeps the virtualizer's coordinate
-  // space simple: items still start at scrollTop=0 of the *content area*,
-  // and padding lives outside the content area for scroll math purposes.
   useLayoutEffect(() => {
     const el = parentRef.current;
     if (!el) return;
     const compute = () => {
-      // py-4 (16px top + 16px bottom) is part of the existing styling; we
-      // don't want to lose that, so the *additional* top padding is the
-      // remaining slack.
       const slack = el.clientHeight - totalSize - 32; // 32 ≈ py-4 vertical
       setTopPad(slack > 0 ? slack : 0);
     };
@@ -72,44 +83,65 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
     return () => ro.disconnect();
   }, [totalSize]);
 
+  // Auto-pin: whenever the inner content grows (new line, or virtualizer
+  // measured a row to a real height larger than the estimate), if the
+  // user wants to be pinned, snap to the new bottom. This is the
+  // single mechanism that handles every "should I scroll?" case.
+  useLayoutEffect(() => {
+    const inner = innerRef.current;
+    const el = parentRef.current;
+    if (!inner || !el) return;
+    const ro = new ResizeObserver(() => {
+      // Sync our notion of scrollHeight before deciding what to do; otherwise
+      // the next onScroll, which fires synchronously after `scrollTop = ...`,
+      // would compute a bogus distance against a stale baseline.
+      if (pinnedRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+      lastScrollHeightRef.current = el.scrollHeight;
+    });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
+
   const onScroll = () => {
     const el = parentRef.current;
     if (!el) return;
-    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-    setStickToBottom(distance < 24);
+    const lastH = lastScrollHeightRef.current;
+    const currH = el.scrollHeight;
+    // If scrollHeight just grew (content layout/measure), do NOT update
+    // the pinned state from this event — the user didn't move. Update
+    // our height baseline and bail. The next user-initiated scroll event
+    // will see currH === lastH and proceed normally.
+    if (currH !== lastH) {
+      lastScrollHeightRef.current = currH;
+      return;
+    }
+    const distance = currH - el.scrollTop - el.clientHeight;
+    const atBottom = distance < 24;
+    pinnedRef.current = atBottom;
+    setPinned(atBottom);
     setTooltip(null);
   };
-
-  useLayoutEffect(() => {
-    if (!stickToBottom) return;
-    const el = parentRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [lines.length, stickToBottom, topPad]);
-
-  useEffect(() => {
-    const el = parentRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, []);
 
   // Track new arrivals while scrolled away from the bottom.
   useEffect(() => {
     const prev = prevLineCountRef.current;
     const next = lines.length;
     prevLineCountRef.current = next;
-    if (next > prev && !stickToBottom) {
+    if (next > prev && !pinned) {
       setUnread((u) => u + (next - prev));
     }
-  }, [lines.length, stickToBottom]);
+  }, [lines.length, pinned]);
 
   useEffect(() => {
-    if (stickToBottom) setUnread(0);
-  }, [stickToBottom]);
+    if (pinned) setUnread(0);
+  }, [pinned]);
 
   const jumpToBottom = () => {
-    const el = parentRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    pinnedRef.current = true;
+    setPinned(true);
+    scrollToBottom();
   };
 
   return (
@@ -125,6 +157,7 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
       style={{ paddingTop: 16 + topPad }}
     >
       <div
+        ref={innerRef}
         style={{
           height: `${totalSize}px`,
           width: '100%',
@@ -170,7 +203,7 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
           {tooltip.text}
         </div>
       )}
-      {!stickToBottom && unread > 0 && (
+      {!pinned && unread > 0 && (
         <button
           onClick={jumpToBottom}
           className="absolute bottom-3 right-4 px-3 py-1.5 bg-neutral-800/90 backdrop-blur text-neutral-100 text-xs border border-neutral-700 hover:bg-neutral-700 transition-colors select-none"
