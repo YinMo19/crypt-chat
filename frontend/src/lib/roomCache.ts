@@ -115,10 +115,10 @@ export async function saveRoomCache(
 ): Promise<void> {
   let cachedLines = lines.slice(-MAX_CACHE_LINES);
   // Trim until the serialized payload fits the per-room budget. Each
-  // iteration drops the oldest 25%; we cap iterations defensively in case
-  // the loop ever fails to converge (it shouldn't — every iteration
-  // shrinks the array — but a guard is cheap).
-  for (let i = 0; i < 16; i++) {
+  // iteration drops the oldest 25%; the array strictly shrinks so the
+  // loop converges to []. If we shrink all the way to empty without
+  // fitting (the `nicknames` map alone exceeds the budget), give up.
+  while (true) {
     const payload: CachedRoom = { lines: cachedLines, nicknames };
     if (JSON.stringify(payload).length <= MAX_CACHE_CHARS) {
       await runTx('readwrite', (store) => store.put(payload, roomId));

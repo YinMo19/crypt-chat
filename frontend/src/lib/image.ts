@@ -36,14 +36,22 @@ export async function compressImage(file: File): Promise<ImageAttachment> {
   try {
     const img = await loadImage(url);
     const { canvas, w, h } = drawScaled(img, MAX_DIMENSION);
-    // Try qualities until we hit the size budget.
-    let blob: Blob | null = null;
+    // Try qualities until we hit the size budget. canvas.toBlob can
+    // return null (unsupported MIME, oversized canvas, OOM); we just
+    // proceed to the next quality. `lastBlob` retains the smallest /
+    // most-compressed result so an over-budget but otherwise valid blob
+    // is still preferable to throwing.
+    let lastBlob: Blob | null = null;
     for (const q of QUALITY_STEPS) {
-      blob = await canvasToBlob(canvas, 'image/jpeg', q);
-      if (blob && blob.size <= TARGET_OUTPUT_BYTES) break;
+      const blob = await canvasToBlob(canvas, 'image/jpeg', q);
+      if (!blob) continue;
+      lastBlob = blob;
+      if (blob.size <= TARGET_OUTPUT_BYTES) break;
     }
-    if (!blob) throw new Error('compression failed');
-    const data = await blobToBase64(blob);
+    if (!lastBlob) {
+      throw new Error('canvas.toBlob returned null at every quality level');
+    }
+    const data = await blobToBase64(lastBlob);
     return { mime: 'image/jpeg', data, w, h };
   } finally {
     URL.revokeObjectURL(url);

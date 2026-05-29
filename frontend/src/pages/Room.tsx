@@ -42,21 +42,25 @@ function RoomInner({ roomId, nickname }: { roomId: string; nickname: string }) {
     roomId,
     nickname,
   );
-  const [copied, setCopied] = useState(false);
+  // `copyState` tri-state: idle / copied / failed. We surface failure
+  // because clipboard.writeText is silently denied on insecure origins
+  // and some browser modes — a clicked button with no visible response
+  // is worse than a small "copy failed" label.
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [replyTo, setReplyTo] = useState<ReplyRef | null>(null);
 
   useEffect(() => {
-    if (!copied) return;
-    const t = setTimeout(() => setCopied(false), 1200);
+    if (copyState === 'idle') return;
+    const t = setTimeout(() => setCopyState('idle'), 1200);
     return () => clearTimeout(t);
-  }, [copied]);
+  }, [copyState]);
 
   const copyRoom = async () => {
     try {
       await navigator.clipboard.writeText(location.href);
-      setCopied(true);
+      setCopyState('copied');
     } catch {
-      /* noop */
+      setCopyState('failed');
     }
   };
 
@@ -82,7 +86,8 @@ function RoomInner({ roomId, nickname }: { roomId: string; nickname: string }) {
           >
             {roomId}
           </button>
-          {copied && <span className="ml-2 text-neutral-500">copied</span>}
+          {copyState === 'copied' && <span className="ml-2 text-neutral-500">copied</span>}
+          {copyState === 'failed' && <span className="ml-2 text-neutral-500">copy failed</span>}
         </div>
         <div className="flex items-center gap-2">
           <span
