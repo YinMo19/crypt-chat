@@ -148,24 +148,34 @@ export async function removeMember(
   return { state: result.newState, commit: b64encode(encodeMlsMessage(result.commit)) };
 }
 
+/**
+ * Decode + join in two distinct steps so the caller can tell them apart:
+ *   - null  : the envelope wasn't a parseable welcome (skip it, keep trying
+ *             the next pending welcome — this is benign garbage).
+ *   - throw : joinGroup itself failed (bad epoch / tampered welcome / impl
+ *             mismatch). The caller should treat this as a hard error and
+ *             tear the session down rather than silently swallowing it.
+ */
 export async function joinFromWelcome(
   encodedWelcome: string,
   identity: MlsIdentity,
 ): Promise<ClientState | null> {
+  let welcome;
   try {
     const msg = decodeMlsMessage(b64decode(encodedWelcome), 0)?.[0];
     if (msg?.wireformat !== 'mls_welcome') return null;
-    return await joinGroup(
-      msg.welcome,
-      identity.publicPackage,
-      identity.privatePackage,
-      emptyPskIndex,
-      await getImpl(),
-    );
+    welcome = msg.welcome;
   } catch (e) {
-    console.warn('joinFromWelcome failed', e);
+    console.warn('joinFromWelcome decode failed', e);
     return null;
   }
+  return joinGroup(
+    welcome,
+    identity.publicPackage,
+    identity.privatePackage,
+    emptyPskIndex,
+    await getImpl(),
+  );
 }
 
 export async function encryptPayload(

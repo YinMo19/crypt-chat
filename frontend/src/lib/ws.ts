@@ -34,11 +34,12 @@ export class WsClient {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${proto}://${location.host}/ws`;
       const ws = new WebSocket(url);
-      let opened = false;
+      // `settled` guards the promise: onopen resolves, the first of
+      // onerror/onclose-before-open rejects, and any later callback is a
+      // no-op. The connect promise must settle exactly once.
       let settled = false;
       this.ws = ws;
       ws.onopen = () => {
-        opened = true;
         settled = true;
         this.openListeners.forEach((l) => l());
         resolve();
@@ -59,7 +60,7 @@ export class WsClient {
       };
       ws.onclose = () => {
         if (this.ws === ws) this.ws = null;
-        if (!opened && !settled) {
+        if (!settled) {
           settled = true;
           reject(new Error('websocket closed before open'));
         }
@@ -69,8 +70,9 @@ export class WsClient {
   }
 
   send(msg: ClientMsg): boolean {
-    if (!this.isOpen()) return false;
-    this.ws!.send(JSON.stringify(msg));
+    const ws = this.ws;
+    if (ws?.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(msg));
     return true;
   }
 

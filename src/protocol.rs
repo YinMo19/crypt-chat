@@ -36,7 +36,7 @@ pub enum ClientMsg {
 
 /// Server → Client. We use `&str` for the hot relay path so that
 /// pre-serialised bytes can be borrowed instead of cloned per recipient.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMsg<'a> {
     /// Join succeeded — assigned ID and current roster.

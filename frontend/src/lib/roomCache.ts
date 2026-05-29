@@ -1,57 +1,132 @@
+/**
+ * Per-room message cache.
+ *
+ * Backed by IndexedDB rather than localStorage because a room with even a
+ * few inline images quickly blows past localStorage's 5–10 MB origin
+ * quota. IndexedDB comfortably holds hundreds of MB per origin.
+ *
+ * Invariants:
+ *   - One DB connection per tab, lazily opened. If the DB cannot be opened
+ *     (private mode in some browsers, disabled storage, etc.) every API
+ *     becomes a silent no-op — chat keeps working, just without history
+ *     across reloads.
+ *   - Each room's record is a single JSON-shaped object keyed by roomId.
+ *     Per-room cap is `MAX_CACHE_CHARS` of serialized JSON; saves above
+ *     the cap drop the oldest 25% of lines until it fits or runs out.
+ */
+
 import type { ChatLine } from './room';
 import type { ImageAttachment, ReplyRef } from './crypto';
 
-const CACHE_PREFIX = 'crypt-chat:room:v1:';
-const MAX_CACHE_LINES = 512;
-const MAX_CACHE_CHARS = 4 * 1024 * 1024;
+const DB_NAME = 'crypt-chat';
+const DB_VERSION = 1;
+const STORE = 'rooms';
+
+const MAX_CACHE_LINES = 4096;
+/**
+ * Per-room cache budget on the serialized JSON length (≈ bytes for the
+ * ASCII base64 + JSON we actually store). 32 MiB lets a room keep a few
+ * dozen compressed images plus thousands of text lines.
+ */
+const MAX_CACHE_CHARS = 32 * 1024 * 1024;
 
 export interface CachedRoom {
   lines: ChatLine[];
   nicknames: Record<string, string>;
 }
 
-export function loadRoomCache(roomId: string): CachedRoom | null {
-  try {
-    const raw = localStorage.getItem(cacheKey(roomId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<CachedRoom>;
-    return {
-      lines: Array.isArray(parsed.lines)
-        ? parsed.lines.flatMap(toChatLine).slice(-MAX_CACHE_LINES)
-        : [],
-      nicknames: cleanNicknames(parsed.nicknames),
+let dbPromise: Promise<IDBDatabase | null> | null = null;
+
+function openDb(): Promise<IDBDatabase | null> {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve) => {
+    if (typeof indexedDB === 'undefined') {
+      resolve(null);
+      return;
+    }
+    let req: IDBOpenDBRequest;
+    try {
+      req = indexedDB.open(DB_NAME, DB_VERSION);
+    } catch {
+      resolve(null);
+      return;
+    }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE);
+      }
     };
-  } catch {
-    return null;
-  }
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => {
+      console.warn('roomCache: indexedDB open failed', req.error);
+      resolve(null);
+    };
+    req.onblocked = () => resolve(null);
+  });
+  return dbPromise;
 }
 
-export function saveRoomCache(
+function runTx<T>(
+  mode: IDBTransactionMode,
+  work: (store: IDBObjectStore) => IDBRequest<T>,
+): Promise<T | null> {
+  return openDb().then(
+    (db) =>
+      new Promise<T | null>((resolve) => {
+        if (!db) {
+          resolve(null);
+          return;
+        }
+        let req: IDBRequest<T>;
+        try {
+          const tx = db.transaction(STORE, mode);
+          req = work(tx.objectStore(STORE));
+        } catch (e) {
+          console.warn('roomCache: tx failed', e);
+          resolve(null);
+          return;
+        }
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => {
+          console.warn('roomCache: req failed', req.error);
+          resolve(null);
+        };
+      }),
+  );
+}
+
+export async function loadRoomCache(roomId: string): Promise<CachedRoom | null> {
+  const raw = await runTx<unknown>('readonly', (store) => store.get(roomId));
+  if (!raw || typeof raw !== 'object') return null;
+  const parsed = raw as Partial<CachedRoom>;
+  return {
+    lines: Array.isArray(parsed.lines)
+      ? parsed.lines.flatMap(toChatLine).slice(-MAX_CACHE_LINES)
+      : [],
+    nicknames: cleanNicknames(parsed.nicknames),
+  };
+}
+
+export async function saveRoomCache(
   roomId: string,
   lines: ChatLine[],
   nicknames: Record<string, string>,
-): void {
+): Promise<void> {
   let cachedLines = lines.slice(-MAX_CACHE_LINES);
-  while (true) {
-    const raw = JSON.stringify({
-      lines: cachedLines,
-      nicknames,
-    } satisfies CachedRoom);
-    if (raw.length <= MAX_CACHE_CHARS) {
-      try {
-        localStorage.setItem(cacheKey(roomId), raw);
-      } catch {
-        /* localStorage may be full or unavailable; chat still works. */
-      }
+  // Trim until the serialized payload fits the per-room budget. Each
+  // iteration drops the oldest 25%; we cap iterations defensively in case
+  // the loop ever fails to converge (it shouldn't — every iteration
+  // shrinks the array — but a guard is cheap).
+  for (let i = 0; i < 16; i++) {
+    const payload: CachedRoom = { lines: cachedLines, nicknames };
+    if (JSON.stringify(payload).length <= MAX_CACHE_CHARS) {
+      await runTx('readwrite', (store) => store.put(payload, roomId));
       return;
     }
     if (cachedLines.length === 0) return;
     cachedLines = cachedLines.slice(Math.ceil(cachedLines.length / 4));
   }
-}
-
-function cacheKey(roomId: string): string {
-  return `${CACHE_PREFIX}${roomId}`;
 }
 
 function cleanNicknames(input: unknown): Record<string, string> {

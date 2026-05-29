@@ -14,6 +14,8 @@
  * payload like text does.
  */
 
+import { b64encode } from './crypto';
+
 export const MAX_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024; // 20 MiB
 const MAX_DIMENSION = 1600;
 const TARGET_OUTPUT_BYTES = 1_200_000; // ~1.2 MiB
@@ -81,20 +83,6 @@ function canvasToBlob(
   return new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
 }
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const ab = await blob.arrayBuffer();
-      // Chunked base64 encode to avoid stack-blowing on large arrays.
-      const bytes = new Uint8Array(ab);
-      let s = '';
-      const CHUNK = 0x8000;
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        s += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-      }
-      resolve(btoa(s));
-    } catch (e) {
-      reject(e);
-    }
-  });
+async function blobToBase64(blob: Blob): Promise<string> {
+  return b64encode(new Uint8Array(await blob.arrayBuffer()));
 }

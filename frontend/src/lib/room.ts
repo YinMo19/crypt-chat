@@ -89,18 +89,13 @@ export interface RoomState {
 }
 
 export function useRoom(roomId: string, nickname: string): RoomState {
-  const [cachedRoom] = useState(() => loadRoomCache(roomId));
   const [status, setStatus] = useState<RoomState['status']>('connecting');
   const [wsConnected, setWsConnected] = useState(false);
   const [myId, setMyId] = useState<string | null>(null);
   const [members, setMembers] = useState<MemberInfo[]>([]);
-  const [nicknames, setNicknames] = useState<Record<string, string>>(
-    cachedRoom?.nicknames ?? {},
-  );
-  const [lines, setLines] = useState<ChatLine[]>(cachedRoom?.lines ?? []);
-  const nicknamesRef = useRef<Record<string, string>>(
-    cachedRoom?.nicknames ?? {},
-  );
+  const [nicknames, setNicknames] = useState<Record<string, string>>({});
+  const [lines, setLines] = useState<ChatLine[]>([]);
+  const nicknamesRef = useRef<Record<string, string>>({});
 
   const identityRef = useRef<MlsIdentity | null>(null);
   const mlsStateRef = useRef<ClientState | null>(null);
@@ -122,17 +117,39 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     nicknameRef.current = cleanNickname(nickname);
   }, [nickname]);
 
+  // Async hydration from IndexedDB. If live messages have already arrived
+  // by the time the cache loads, the cache is stale by definition — drop
+  // it rather than racing with the live state.
+  useEffect(() => {
+    let alive = true;
+    void loadRoomCache(roomId).then((cached) => {
+      if (!alive || !cached) return;
+      setLines((prev) => (prev.length === 0 ? cached.lines : prev));
+      setNicknames((prev) => {
+        if (Object.keys(prev).length > 0) return prev;
+        nicknamesRef.current = cached.nicknames;
+        return cached.nicknames;
+      });
+    });
+    return () => {
+      alive = false;
+    };
+  }, [roomId]);
+
   useEffect(() => {
     cacheStateRef.current = { lines, nicknames };
     const timer = window.setTimeout(() => {
-      saveRoomCache(roomId, lines, nicknames);
+      void saveRoomCache(roomId, lines, nicknames);
     }, 250);
     return () => window.clearTimeout(timer);
   }, [lines, nicknames, roomId]);
 
   useEffect(() => {
     return () => {
-      saveRoomCache(
+      // Fire-and-forget on unmount. IndexedDB queues the write at request
+      // time, so the put survives the React teardown even though we don't
+      // await it.
+      void saveRoomCache(
         roomId,
         cacheStateRef.current.lines,
         cacheStateRef.current.nicknames,
@@ -278,7 +295,18 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     if (mlsStateRef.current || !identityRef.current) return;
     while (pendingWelcomesRef.current.length > 0) {
       const welcome = pendingWelcomesRef.current.shift()!;
-      const state = await joinFromWelcome(welcome, identityRef.current);
+      let state: ClientState | null;
+      try {
+        state = await joinFromWelcome(welcome, identityRef.current);
+      } catch (e) {
+        // joinGroup itself failed — the welcome decoded but applying it
+        // produced an unrecoverable MLS state. Anything else queued is
+        // suspect; drop it and reconnect for a fresh epoch.
+        console.warn('MLS join failed', e);
+        pendingWelcomesRef.current = [];
+        requestReconnect('MLS join failed');
+        return;
+      }
       if (!state) continue;
       mlsStateRef.current = state;
       readyRef.current = true;
@@ -287,7 +315,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       setStatus('connected');
       return;
     }
-  }, [clearWelcomeTimer]);
+  }, [clearWelcomeTimer, requestReconnect]);
 
   const commitAdd = useCallback(
     async (peer: PeerEntry) => {

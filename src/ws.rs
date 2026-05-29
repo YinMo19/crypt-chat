@@ -57,20 +57,20 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
 
     // First frame must be Join. Read it before spawning the writer so that
     // join failures are simple and don't need cross-task cleanup.
-    let first = match receiver.next().await {
-        Some(Ok(Message::Text(s))) => s,
-        _ => return,
+    let Some(Ok(Message::Text(first))) = receiver.next().await else {
+        return;
     };
 
-    let (room_id, public_key) = match serde_json::from_str::<ClientMsg>(&first) {
-        Ok(ClientMsg::Join { room, public_key }) => (room, public_key),
-        _ => {
-            let frame = encode(&ServerMsg::Error {
-                reason: "first frame must be join",
-            });
-            let _ = sender.send(Message::Text(frame.to_string())).await;
-            return;
-        }
+    let Ok(ClientMsg::Join {
+        room: room_id,
+        public_key,
+    }) = serde_json::from_str::<ClientMsg>(&first)
+    else {
+        let frame = encode(&ServerMsg::Error {
+            reason: "first frame must be join",
+        });
+        let _ = sender.send(Message::Text(frame.to_string())).await;
+        return;
     };
 
     if !is_valid_room_id(&room_id) {
@@ -110,12 +110,15 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
     }
 
     // Direct: tell ourselves the assigned id + roster snapshot.
-    let snapshot = room.member_infos();
-    // Filter ourselves out of the snapshot (we just inserted, so we'd see it).
-    let snapshot: Vec<MemberInfo> = snapshot.into_iter().filter(|m| m.id != my_id).collect();
+    // Filter ourselves out (we just inserted, so we'd otherwise see it).
+    let members: Vec<MemberInfo> = room
+        .member_infos()
+        .into_iter()
+        .filter(|m| m.id != my_id)
+        .collect();
     let joined_self = encode(&ServerMsg::Joined {
         your_id: my_id,
-        members: snapshot,
+        members,
     });
     let _ = direct_tx.try_send(joined_self);
 
@@ -179,13 +182,9 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(s) => {
-                if s.len() > MAX_INBOUND_FRAME {
-                    let frame = encode(&ServerMsg::Error {
-                        reason: "frame too large",
-                    });
-                    let _ = direct_tx.try_send(frame);
-                    continue;
-                }
+                // Per-frame size cap is enforced at the WS layer
+                // (max_message_size / max_frame_size on the upgrade), so we
+                // never see an over-sized payload here.
                 let parsed: Result<ClientMsg, _> = serde_json::from_str(&s);
                 match parsed {
                     Ok(ClientMsg::Relay { to, envelope }) => {

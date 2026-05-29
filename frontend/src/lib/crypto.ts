@@ -31,9 +31,18 @@ export interface PlaintextPayload {
 
 // --- base64 helpers ---
 
+/**
+ * Chunked encode so a large Uint8Array (e.g. a compressed image blob) does
+ * not blow the call stack: String.fromCharCode(...arr) spreads every byte
+ * as an argument, which throws on ~100k+ length inputs in some engines.
+ */
+const B64_CHUNK = 0x8000;
+
 export function b64encode(bytes: Uint8Array): string {
   let s = '';
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i += B64_CHUNK) {
+    s += String.fromCharCode(...bytes.subarray(i, i + B64_CHUNK));
+  }
   return btoa(s);
 }
 

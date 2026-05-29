@@ -102,10 +102,9 @@ impl Room {
     /// Look up a single member's direct channel. Used to route `Relay` frames
     /// addressed with `to: Some(uuid)`.
     pub fn direct_send(&self, target: Uuid, frame: &Frame) -> bool {
-        match self.members.get(&target) {
-            Some(m) => m.value().direct_tx.try_send(frame.clone()).is_ok(),
-            None => false,
-        }
+        self.members
+            .get(&target)
+            .is_some_and(|m| m.value().direct_tx.try_send(frame.clone()).is_ok())
     }
 
     /// Push a frame to the room's broadcast channel. O(1), wait-free against

@@ -43,8 +43,8 @@ async fn main() {
     let bind = format!("{}:{}", args.addr, args.port);
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
-        .unwrap_or_else(|e| panic!("failed to bind {bind}: {e}"));
+        .expect("failed to bind");
 
     tracing::info!("crypt-chat listening on http://{bind}");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await.expect("serve failed");
 }
