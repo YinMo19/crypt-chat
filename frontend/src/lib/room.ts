@@ -29,6 +29,7 @@ import {
   type MlsIdentity,
 } from './mls';
 import { cleanNickname } from './nickname';
+import { loadRoomCache, saveRoomCache } from './roomCache';
 import { WsClient, type MemberInfo } from './ws';
 import type { ClientState, KeyPackage } from 'ts-mls';
 
@@ -73,6 +74,7 @@ function reconnectDelayMs(attempt: number): number {
 
 export interface RoomState {
   status: 'connecting' | 'connected' | 'reconnecting' | 'closed';
+  wsConnected: boolean;
   myId: string | null;
   /** Full roster including me. Stable across re-renders only when the set
    * of ids changes; consumers should treat the array as immutable. */
@@ -83,16 +85,22 @@ export interface RoomState {
   send: (
     text: string,
     opts?: { replyTo?: ReplyRef; image?: ImageAttachment },
-  ) => void;
+  ) => Promise<boolean>;
 }
 
 export function useRoom(roomId: string, nickname: string): RoomState {
+  const [cachedRoom] = useState(() => loadRoomCache(roomId));
   const [status, setStatus] = useState<RoomState['status']>('connecting');
+  const [wsConnected, setWsConnected] = useState(false);
   const [myId, setMyId] = useState<string | null>(null);
   const [members, setMembers] = useState<MemberInfo[]>([]);
-  const [nicknames, setNicknames] = useState<Record<string, string>>({});
-  const [lines, setLines] = useState<ChatLine[]>([]);
-  const nicknamesRef = useRef<Record<string, string>>({});
+  const [nicknames, setNicknames] = useState<Record<string, string>>(
+    cachedRoom?.nicknames ?? {},
+  );
+  const [lines, setLines] = useState<ChatLine[]>(cachedRoom?.lines ?? []);
+  const nicknamesRef = useRef<Record<string, string>>(
+    cachedRoom?.nicknames ?? {},
+  );
 
   const identityRef = useRef<MlsIdentity | null>(null);
   const mlsStateRef = useRef<ClientState | null>(null);
@@ -108,10 +116,29 @@ export function useRoom(roomId: string, nickname: string): RoomState {
   const readyRef = useRef(false);
   const connectedOnceRef = useRef(false);
   const queueRef = useRef(Promise.resolve());
+  const cacheStateRef = useRef({ lines, nicknames });
 
   useEffect(() => {
     nicknameRef.current = cleanNickname(nickname);
   }, [nickname]);
+
+  useEffect(() => {
+    cacheStateRef.current = { lines, nicknames };
+    const timer = window.setTimeout(() => {
+      saveRoomCache(roomId, lines, nicknames);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [lines, nicknames, roomId]);
+
+  useEffect(() => {
+    return () => {
+      saveRoomCache(
+        roomId,
+        cacheStateRef.current.lines,
+        cacheStateRef.current.nicknames,
+      );
+    };
+  }, [roomId]);
 
   const pushLine = useCallback((line: ChatLine) => {
     setLines((prev) => {
@@ -171,10 +198,14 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     setMembers(out.sort((a, b) => a.id.localeCompare(b.id)));
   }, []);
 
-  const enqueue = useCallback((work: () => Promise<void>) => {
-    queueRef.current = queueRef.current
-      .then(work)
-      .catch((e) => console.warn('room task failed', e));
+  const enqueue = useCallback(<T,>(work: () => Promise<T>): Promise<T | null> => {
+    const task = queueRef.current.then(work);
+    queueRef.current = task
+      .then(() => undefined)
+      .catch((e) => {
+        console.warn('room task failed', e);
+      });
+    return task.catch(() => null);
   }, []);
 
   const sponsorId = useCallback((): string | null => {
@@ -411,6 +442,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       manualClose = true;
       clientRef.current?.close();
       clientRef.current = null;
+      setWsConnected(false);
       manualClose = false;
     };
 
@@ -554,6 +586,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       offClose = client.onClose(() => {
         if (!alive) return;
         if (clientRef.current === client) clientRef.current = null;
+        setWsConnected(false);
         if (manualClose) return;
         scheduleReconnect();
       });
@@ -566,6 +599,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
         resetCryptoForJoin(identity);
         await client.connect();
         if (!alive || clientRef.current !== client) return;
+        setWsConnected(true);
         client.send({
           type: 'join',
           room: roomId,
@@ -622,13 +656,13 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     (
       text: string,
       opts?: { replyTo?: ReplyRef; image?: ImageAttachment },
-    ) => {
-      enqueue(async () => {
+    ): Promise<boolean> => {
+      return enqueue(async () => {
         const state = mlsStateRef.current;
         const me = myIdRef.current;
-        if (!state || !me || !readyRef.current) return;
+        if (!state || !me || !readyRef.current) return false;
         const trimmed = text.trim();
-        if (!trimmed && !opts?.image) return;
+        if (!trimmed && !opts?.image) return false;
 
         const payload: PlaintextPayload = {
           nickname: nicknameRef.current,
@@ -643,7 +677,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
           const sent = sendEnvelope(result.envelope);
           if (!sent) {
             requestReconnect('send failed');
-            return;
+            return false;
           }
           pushLine({
             kind: 'msg',
@@ -656,14 +690,16 @@ export function useRoom(roomId: string, nickname: string): RoomState {
             replyTo: opts?.replyTo,
             image: opts?.image,
           });
+          return true;
         } catch (e) {
           console.warn('MLS send failed', e);
           requestReconnect('MLS send failed');
+          return false;
         }
-      });
+      }).then((ok) => ok === true);
     },
     [enqueue, pushLine, requestReconnect, sendEnvelope],
   );
 
-  return { status, myId, members, nicknames, lines, send };
+  return { status, wsConnected, myId, members, nicknames, lines, send };
 }

@@ -42,13 +42,28 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
   // we want to *not* treat the implied distance-from-bottom change as
   // "user scrolled up". This ref records the height we last saw / set.
   const lastScrollHeightRef = useRef(0);
+  const segmentsRef = useRef(
+    new Map<string, { text: string; segments: MessageSegment[] }>(),
+  );
 
   const segments = useMemo(() => {
-    const m = new Map<string, MessageSegment[]>();
+    const cache = segmentsRef.current;
+    const active = new Set<string>();
     for (const line of lines) {
-      if (line.kind === 'msg') m.set(line.id, parseMessage(line.text));
+      if (line.kind !== 'msg') continue;
+      active.add(line.id);
+      const cached = cache.get(line.id);
+      if (!cached || cached.text !== line.text) {
+        cache.set(line.id, {
+          text: line.text,
+          segments: parseMessage(line.text),
+        });
+      }
     }
-    return m;
+    for (const id of cache.keys()) {
+      if (!active.has(id)) cache.delete(id);
+    }
+    return cache;
   }, [lines]);
 
   const virtualizer = useVirtualizer({
@@ -181,7 +196,7 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
             >
               <Row
                 line={line}
-                segments={segments.get(line.id)}
+                segments={segments.get(line.id)?.segments}
                 nicknames={nicknames}
                 onReply={onReply}
                 onShowTime={(y, text) => setTooltip({ y, text })}

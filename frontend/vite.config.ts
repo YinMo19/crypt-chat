@@ -16,6 +16,17 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      onwarn(warning, warn) {
+        if (
+          warning.code === 'INVALID_ANNOTATION' &&
+          warning.id?.includes('/@hpke/common/')
+        ) {
+          return;
+        }
+        warn(warning);
+      },
+    },
   },
   server: {
     proxy: {

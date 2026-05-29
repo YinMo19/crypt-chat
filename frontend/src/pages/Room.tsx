@@ -27,11 +27,11 @@ export function Room() {
   if (!nickname)
     return <Navigate to="/" replace state={{ prefillRoom: roomId }} />;
 
-  return <RoomInner roomId={roomId} nickname={nickname} />;
+  return <RoomInner key={roomId} roomId={roomId} nickname={nickname} />;
 }
 
 function RoomInner({ roomId, nickname }: { roomId: string; nickname: string }) {
-  const { status, lines, members, nicknames, myId, send } = useRoom(
+  const { status, wsConnected, lines, members, nicknames, myId, send } = useRoom(
     roomId,
     nickname,
   );
@@ -77,7 +77,13 @@ function RoomInner({ roomId, nickname }: { roomId: string; nickname: string }) {
           </button>
           {copied && <span className="ml-2 text-neutral-500">copied</span>}
         </div>
-        <div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`inline-block h-2 w-2 rounded-full ${
+              wsConnected ? 'bg-emerald-400' : 'bg-red-500'
+            }`}
+            title={wsConnected ? 'websocket connected' : 'websocket disconnected'}
+          />
           {status === 'connected' && `${members.length} here`}
           {status === 'connecting' && 'connecting…'}
           {status === 'reconnecting' && 'reconnecting…'}

@@ -16,7 +16,10 @@ import type { MemberInfo } from '../lib/ws';
 import { compressImage, MAX_IMAGE_SOURCE_BYTES } from '../lib/image';
 
 interface Props {
-  onSend: (text: string, opts?: { replyTo?: ReplyRef; image?: ImageAttachment }) => void;
+  onSend: (
+    text: string,
+    opts?: { replyTo?: ReplyRef; image?: ImageAttachment },
+  ) => Promise<boolean>;
   disabled?: boolean;
   members: MemberInfo[];
   nicknames: Record<string, string>;
@@ -43,6 +46,13 @@ interface Candidate {
   nickname: string;
 }
 
+interface MentionSpan {
+  start: number;
+  end: number;
+  token: string;
+  id: string;
+}
+
 export function MessageInput({
   onSend,
   disabled,
@@ -62,10 +72,12 @@ export function MessageInput({
   const [menuRange, setMenuRange] = useState<[number, number] | null>(null);
   const [menuIndex, setMenuIndex] = useState(0);
 
-  // Track inserted mentions: token text in textarea -> full member id.
+  // Track inserted mentions by range, not just token text. This keeps two
+  // users with the same nickname, or hand-typed `@nick`, from being rewritten
+  // to the wrong id at submit time.
   // We keep this in a ref because it doesn't drive rendering directly;
   // it only matters at submit time to rewrite tokens to wire form.
-  const mentionsRef = useRef<Map<string, string>>(new Map());
+  const mentionsRef = useRef<MentionSpan[]>([]);
 
   // IME composition state. We treat all keys during composition as
   // composition-internal, plus a small grace window after compositionend.
@@ -75,6 +87,8 @@ export function MessageInput({
   // Pending image attachment (compressed). Cleared on send.
   const [pendingImage, setPendingImage] = useState<ImageAttachment | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     const ta = taRef.current;
@@ -101,6 +115,8 @@ export function MessageInput({
 
   const onChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value;
+    setSendError(null);
+    mentionsRef.current = adjustMentionSpans(mentionsRef.current, value, v);
     setValue(v);
     const sel = e.target.selectionStart ?? v.length;
     const r = refreshMenu(v, sel);
@@ -108,15 +124,6 @@ export function MessageInput({
     setMenuQuery(r.query);
     setMenuRange(r.range);
     setMenuIndex(0);
-
-    // Mentions map gets stale when the user backspaces into a token.
-    // Lazy GC: drop entries whose token string no longer appears verbatim
-    // in the textarea content.
-    if (mentionsRef.current.size > 0) {
-      for (const token of Array.from(mentionsRef.current.keys())) {
-        if (!v.includes(token)) mentionsRef.current.delete(token);
-      }
-    }
   };
 
   const candidates: Candidate[] = useMemo(() => {
@@ -155,7 +162,13 @@ export function MessageInput({
     const token = `@${c.nickname}`;
     const next = value.slice(0, a) + token + ' ' + value.slice(b);
     setValue(next);
-    mentionsRef.current.set(token, c.id);
+    mentionsRef.current = adjustMentionSpans(mentionsRef.current, value, next);
+    mentionsRef.current.push({
+      start: a,
+      end: a + token.length,
+      token,
+      id: c.id,
+    });
     setMenuOpen(false);
     requestAnimationFrame(() => {
       const ta = taRef.current;
@@ -168,34 +181,55 @@ export function MessageInput({
 
   /** Rewrite visible nickname tokens into wire mentions: @<full-uuid>. */
   const rewriteMentions = (text: string): string => {
-    if (mentionsRef.current.size === 0) return text;
-    let out = text;
-    // Sort by token length DESC so longer tokens replace before shorter
-    // ones — guards against `@al` matching when `@alice` is intended.
-    const tokens = Array.from(mentionsRef.current.entries()).sort(
-      (a, b) => b[0].length - a[0].length,
-    );
-    for (const [token, id] of tokens) {
-      // Literal split/join means nickname characters never need regex escaping.
-      out = out.split(token).join(`@${id}`);
+    if (mentionsRef.current.length === 0) return text;
+    const leadingTrim = value.length - value.trimStart().length;
+    const spans = mentionsRef.current
+      .map((span) => ({
+        ...span,
+        start: span.start - leadingTrim,
+        end: span.end - leadingTrim,
+      }))
+      .filter(
+        (span) =>
+          span.start >= 0 &&
+          span.end <= text.length &&
+          text.slice(span.start, span.end) === span.token,
+      )
+      .sort((a, b) => a.start - b.start);
+    if (spans.length === 0) return text;
+    let out = '';
+    let pos = 0;
+    for (const span of spans) {
+      out += text.slice(pos, span.start);
+      out += `@${span.id}`;
+      pos = span.end;
     }
-    return out;
+    return out + text.slice(pos);
   };
 
-  const submit = (e?: FormEvent) => {
+  const submit = async (e?: FormEvent) => {
     e?.preventDefault();
+    if (sending) return;
     const trimmed = value.replace(/^\s+|\s+$/g, '');
     if (!trimmed && !pendingImage) return;
     const wireText = rewriteMentions(trimmed);
-    onSend(wireText, {
+    setSending(true);
+    setSendError(null);
+    const sent = await onSend(wireText, {
       replyTo: replyTo ?? undefined,
       image: pendingImage ?? undefined,
     });
-    setValue('');
-    mentionsRef.current.clear();
-    setPendingImage(null);
-    onClearReply();
-    setMenuOpen(false);
+    setSending(false);
+    if (sent) {
+      setValue('');
+      mentionsRef.current = [];
+      setPendingImage(null);
+      onClearReply();
+      setMenuOpen(false);
+    } else {
+      setSendError('send failed, message kept');
+    }
+    requestAnimationFrame(() => taRef.current?.focus());
   };
 
   /** Are we currently inside an IME composition (or just-finished one)? */
@@ -342,8 +376,10 @@ export function MessageInput({
           </button>
         </div>
       )}
-      {imageError && (
-        <div className="text-xs text-neutral-500 pb-1.5">{imageError}</div>
+      {(imageError || sendError) && (
+        <div className="text-xs text-neutral-500 pb-1.5">
+          {imageError ?? sendError}
+        </div>
       )}
       {replyTo && (
         <div className="text-xs text-neutral-500 pb-1.5 flex items-center gap-2">
@@ -386,10 +422,10 @@ export function MessageInput({
           onCompositionStart={onCompositionStart}
           onCompositionEnd={onCompositionEnd}
           onPaste={onPaste}
-          disabled={disabled}
+          disabled={disabled || sending}
           autoFocus
           rows={1}
-          placeholder="say something  (Enter to send, Shift+Enter for newline, @ to mention)"
+          placeholder={sending ? 'sending...' : 'say something  (Enter to send, Shift+Enter for newline, @ to mention)'}
           className="block flex-1 resize-none bg-transparent text-[15px] leading-[22px] placeholder:text-neutral-600 disabled:opacity-30"
           // 64 KiB. The HTML `maxLength` attribute is a hard truncation
           // applied even on paste, so we set it large enough to fit a full
@@ -400,4 +436,40 @@ export function MessageInput({
       </div>
     </form>
   );
+}
+
+function adjustMentionSpans(
+  spans: MentionSpan[],
+  before: string,
+  after: string,
+): MentionSpan[] {
+  if (spans.length === 0) return spans;
+  let start = 0;
+  while (
+    start < before.length &&
+    start < after.length &&
+    before[start] === after[start]
+  ) {
+    start++;
+  }
+  let beforeEnd = before.length;
+  let afterEnd = after.length;
+  while (
+    beforeEnd > start &&
+    afterEnd > start &&
+    before[beforeEnd - 1] === after[afterEnd - 1]
+  ) {
+    beforeEnd--;
+    afterEnd--;
+  }
+  const delta = afterEnd - beforeEnd;
+  const next: MentionSpan[] = [];
+  for (const span of spans) {
+    if (span.end <= start) {
+      next.push(span);
+    } else if (span.start >= beforeEnd) {
+      next.push({ ...span, start: span.start + delta, end: span.end + delta });
+    }
+  }
+  return next.filter((span) => after.slice(span.start, span.end) === span.token);
 }
