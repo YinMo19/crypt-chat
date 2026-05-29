@@ -59,7 +59,10 @@ function RoomInner({ roomId, nickname }: { roomId: string; nickname: string }) {
   };
 
   return (
-    <div className="min-h-full flex flex-col">
+    // h-full (not min-h-full): cap the column at the viewport so the
+    // input row stays anchored at the bottom and the message list scrolls
+    // internally instead of pushing the input off-screen.
+    <div className="h-full flex flex-col">
       <header className="flex items-baseline justify-between px-6 pt-4 pb-2 text-xs text-neutral-400">
         <div>
           <span className="text-neutral-500">room</span>{' '}

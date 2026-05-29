@@ -116,7 +116,12 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
     <div
       ref={parentRef}
       onScroll={onScroll}
-      className="relative flex-1 overflow-y-auto px-6 py-4 leading-relaxed text-[15px]"
+      // min-h-0 is essential: as a flex child this element's default
+      // min-height is `auto`, which forbids it from being smaller than its
+      // intrinsic content. Without that override the scroll container
+      // grows with the message list instead of overflowing into a scroll,
+      // which pushes the input row off-screen as new messages arrive.
+      className="relative flex-1 min-h-0 overflow-y-auto px-6 py-4 leading-relaxed text-[15px]"
       style={{ paddingTop: 16 + topPad }}
     >
       <div
