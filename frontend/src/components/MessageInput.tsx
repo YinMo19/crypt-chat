@@ -27,6 +27,8 @@ interface Props {
 
 const MAX_HEIGHT_PX = 8 * 22;
 const MENTION_LIMIT = 8;
+/** Per-message text size cap. 64 KiB = a full long source file. */
+const MAX_TEXT_CHARS = 64 * 1024;
 /**
  * After an IME composition ends, swallow Enter for this long. Some IMEs
  * (notably macOS Pinyin and certain Android keyboards) fire `keydown.Enter`
@@ -396,7 +398,11 @@ export function MessageInput({
           rows={1}
           placeholder="say something  (Enter to send, Shift+Enter for newline, @ to mention)"
           className="block flex-1 resize-none bg-transparent text-[15px] leading-[22px] placeholder:text-neutral-600 disabled:opacity-30"
-          maxLength={4000}
+          // 64 KiB. The HTML `maxLength` attribute is a hard truncation
+          // applied even on paste, so we set it large enough to fit a full
+          // source file. The server frame cap is much higher (6 MiB) and
+          // accommodates this plus a co-attached image with room to spare.
+          maxLength={MAX_TEXT_CHARS}
         />
       </div>
     </form>
