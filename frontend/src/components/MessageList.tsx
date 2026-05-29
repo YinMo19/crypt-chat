@@ -24,6 +24,15 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [stickToBottom, setStickToBottom] = useState(true);
   const [tooltip, setTooltip] = useState<{ y: number; text: string } | null>(null);
+  // Count of new lines that arrived while the user was scrolled away from
+  // the bottom. Resets the moment they get back. Surfaced as a small
+  // floating "N new" affordance in the bottom-right.
+  const [unread, setUnread] = useState(0);
+  const prevLineCountRef = useRef(0);
+  // Top-padding pushed onto the scroll container so short content sits at
+  // the bottom of the viewport. Recomputed whenever totalSize or viewport
+  // height changes.
+  const [topPad, setTopPad] = useState(0);
 
   const segments = useMemo(() => {
     const m = new Map<string, MessageSegment[]>();
@@ -41,6 +50,28 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
     getItemKey: (i) => lines[i].id,
   });
 
+  const totalSize = virtualizer.getTotalSize();
+
+  // Recalculate top padding so the items hug the bottom edge when short.
+  // Using padding (not a sibling spacer) keeps the virtualizer's coordinate
+  // space simple: items still start at scrollTop=0 of the *content area*,
+  // and padding lives outside the content area for scroll math purposes.
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const compute = () => {
+      // py-4 (16px top + 16px bottom) is part of the existing styling; we
+      // don't want to lose that, so the *additional* top padding is the
+      // remaining slack.
+      const slack = el.clientHeight - totalSize - 32; // 32 ≈ py-4 vertical
+      setTopPad(slack > 0 ? slack : 0);
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [totalSize]);
+
   const onScroll = () => {
     const el = parentRef.current;
     if (!el) return;
@@ -54,22 +85,43 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
     const el = parentRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [lines.length, stickToBottom]);
+  }, [lines.length, stickToBottom, topPad]);
 
   useEffect(() => {
     const el = parentRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
+  // Track new arrivals while scrolled away from the bottom.
+  useEffect(() => {
+    const prev = prevLineCountRef.current;
+    const next = lines.length;
+    prevLineCountRef.current = next;
+    if (next > prev && !stickToBottom) {
+      setUnread((u) => u + (next - prev));
+    }
+  }, [lines.length, stickToBottom]);
+
+  useEffect(() => {
+    if (stickToBottom) setUnread(0);
+  }, [stickToBottom]);
+
+  const jumpToBottom = () => {
+    const el = parentRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  };
+
   return (
     <div
       ref={parentRef}
       onScroll={onScroll}
       className="relative flex-1 overflow-y-auto px-6 py-4 leading-relaxed text-[15px]"
+      style={{ paddingTop: 16 + topPad }}
     >
       <div
         style={{
-          height: `${virtualizer.getTotalSize()}px`,
+          height: `${totalSize}px`,
           width: '100%',
           position: 'relative',
         }}
@@ -112,6 +164,15 @@ export function MessageList({ lines, nicknames, onReply }: Props) {
         >
           {tooltip.text}
         </div>
+      )}
+      {!stickToBottom && unread > 0 && (
+        <button
+          onClick={jumpToBottom}
+          className="absolute bottom-3 right-4 px-3 py-1.5 bg-neutral-800/90 backdrop-blur text-neutral-100 text-xs border border-neutral-700 hover:bg-neutral-700 transition-colors select-none"
+          title="jump to latest"
+        >
+          ↓ {unread} new
+        </button>
       )}
     </div>
   );
