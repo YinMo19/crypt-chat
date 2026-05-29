@@ -19,7 +19,8 @@ RUN corepack enable
 
 # Cache deps separately from sources for faster rebuilds.
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile
 
 COPY frontend/ ./
 RUN pnpm build
@@ -42,8 +43,8 @@ COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir -p src && echo "fn main() {}" > src/main.rs
 # Need at least an index.html so rust-embed's macro doesn't fail at build.
 RUN mkdir -p frontend/dist && echo "<!doctype html>" > frontend/dist/index.html
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-target,target=/app/target,sharing=locked \
     cargo build --release --target $(uname -m)-unknown-linux-musl
 
 # Now bring in the real sources + the prebuilt frontend dist.
@@ -52,8 +53,8 @@ COPY --from=frontend /app/frontend/dist ./frontend/dist
 
 # Touch main.rs so cargo rebuilds the binary, not just deps.
 RUN touch src/main.rs
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-target,target=/app/target,sharing=locked \
     cargo build --release --target $(uname -m)-unknown-linux-musl && \
     cp target/$(uname -m)-unknown-linux-musl/release/crypt-chat /app/crypt-chat
 

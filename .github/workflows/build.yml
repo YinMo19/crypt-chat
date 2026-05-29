@@ -20,7 +20,8 @@ jobs:
         id: owner
         run: echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - id: setup-buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -40,18 +41,54 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # Persist BuildKit cache mount contents (cargo registry, cargo target,
+      # pnpm store) into GitHub Actions cache. Without this, the
+      # `--mount=type=cache` declarations in the Containerfile are
+      # effectively no-ops on ephemeral runners — every push has to
+      # recompile every dependency from scratch. The dance-action moves
+      # these dirs into the host filesystem before/after the build so
+      # actions/cache can serialize them.
+      - name: Cache buildkit mounts
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            cache/cargo-registry
+            cache/cargo-target
+            cache/pnpm-store
+          # Bust on lockfile / Containerfile change. Source-only changes
+          # reuse the cache and rely on cargo incremental compilation.
+          key: bk-cache-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'frontend/pnpm-lock.yaml', 'Containerfile') }}
+          restore-keys: |
+            bk-cache-${{ runner.os }}-
+
+      - name: Inject cache mounts into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@v3.1.2
+        with:
+          builder: ${{ steps.setup-buildx.outputs.name }}
+          cache-map: |
+            {
+              "cache/cargo-registry": "/usr/local/cargo/registry",
+              "cache/cargo-target":   "/app/target",
+              "cache/pnpm-store":     "/root/.local/share/pnpm/store"
+            }
+          skip-extraction: ${{ steps.cache.outputs.cache-hit }}
+
       - name: Build & push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Containerfile
-          # x86_64 musl only — that's what every modern Linux server runs.
-          # If we ever need arm64 we'd add `setup-qemu-action` back and
-          # re-add it to this list, but cross-arch via QEMU roughly doubles
-          # the build wall-time so keep it single-arch by default.
+          # x86_64 musl only — every realistic deployment target is x86_64
+          # Linux musl. To re-add arm64, restore setup-qemu-action above
+          # and add `,linux/arm64` here, but cross-arch via QEMU roughly
+          # doubles the build wall-time.
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Layer cache: if a RUN step's inputs are unchanged, the whole
+          # layer is reused. The cache mount above keeps any rerun
+          # incremental (cargo only recompiles edited crates).
           cache-from: type=gha
           cache-to: type=gha,mode=max
