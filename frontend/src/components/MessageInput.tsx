@@ -267,7 +267,9 @@ export function MessageInput({
       return;
     }
     if (file.size > MAX_IMAGE_SOURCE_BYTES) {
-      setImageError(`image too large (${(file.size / 1024 / 1024).toFixed(1)} MB > 5 MB)`);
+      const sizeMb = (file.size / 1024 / 1024).toFixed(1);
+      const maxMb = Math.round(MAX_IMAGE_SOURCE_BYTES / 1024 / 1024);
+      setImageError(`image too large (${sizeMb} MB > ${maxMb} MB)`);
       return;
     }
     try {

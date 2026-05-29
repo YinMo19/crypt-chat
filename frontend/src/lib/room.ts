@@ -56,8 +56,17 @@ interface PeerEntry {
 let lineCounter = 0;
 const nextLineId = () => `${Date.now()}-${lineCounter++}`;
 
+const RECONNECT_BASE_MS = 500;
+const RECONNECT_MAX_MS = 8_000;
+const WELCOME_TIMEOUT_MS = 8_000;
+
+function reconnectDelayMs(attempt: number): number {
+  const capped = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempt);
+  return capped + Math.floor(Math.random() * Math.min(500, capped / 4));
+}
+
 export interface RoomState {
-  status: 'connecting' | 'connected' | 'closed';
+  status: 'connecting' | 'connected' | 'reconnecting' | 'closed';
   myId: string | null;
   /** Full roster including me. Stable across re-renders only when the set
    * of ids changes; consumers should treat the array as immutable. */
@@ -84,9 +93,12 @@ export function useRoom(roomId: string, nickname: string): RoomState {
   const pendingAddsRef = useRef<Map<string, PeerEntry>>(new Map());
   const pendingWelcomesRef = useRef<string[]>([]);
   const clientRef = useRef<WsClient | null>(null);
+  const reconnectRef = useRef<((reason: string) => void) | null>(null);
+  const welcomeTimerRef = useRef<number | null>(null);
   const myIdRef = useRef<string | null>(null);
   const nicknameRef = useRef(cleanNickname(nickname));
   const readyRef = useRef(false);
+  const connectedOnceRef = useRef(false);
   const queueRef = useRef(Promise.resolve());
 
   useEffect(() => {
@@ -147,9 +159,43 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     return !!me && sponsorId() === me;
   }, [sponsorId]);
 
-  const sendEnvelope = useCallback((envelope: string, to?: string) => {
-    clientRef.current?.send({ type: 'relay', to, envelope });
+  const requestReconnect = useCallback((reason: string) => {
+    reconnectRef.current?.(reason);
   }, []);
+
+  const clearWelcomeTimer = useCallback(() => {
+    if (welcomeTimerRef.current === null) return;
+    window.clearTimeout(welcomeTimerRef.current);
+    welcomeTimerRef.current = null;
+  }, []);
+
+  const armWelcomeTimeout = useCallback(() => {
+    clearWelcomeTimer();
+    if (mlsStateRef.current || peersRef.current.size === 0) return;
+    welcomeTimerRef.current = window.setTimeout(() => {
+      welcomeTimerRef.current = null;
+      if (!mlsStateRef.current && peersRef.current.size > 0) {
+        requestReconnect('MLS welcome timed out');
+      }
+    }, WELCOME_TIMEOUT_MS);
+  }, [clearWelcomeTimer, requestReconnect]);
+
+  const sendEnvelope = useCallback((envelope: string, to?: string): boolean => {
+    return clientRef.current?.send({ type: 'relay', to, envelope }) ?? false;
+  }, []);
+
+  const resetCryptoForJoin = useCallback((identity: MlsIdentity) => {
+    clearWelcomeTimer();
+    identityRef.current = identity;
+    mlsStateRef.current = null;
+    peersRef.current.clear();
+    pendingAddsRef.current.clear();
+    pendingWelcomesRef.current = [];
+    myIdRef.current = null;
+    readyRef.current = false;
+    setMyId(null);
+    setMembers([]);
+  }, [clearWelcomeTimer]);
 
   const tryJoinPendingWelcome = useCallback(async () => {
     if (mlsStateRef.current || !identityRef.current) return;
@@ -159,10 +205,12 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       if (!state) continue;
       mlsStateRef.current = state;
       readyRef.current = true;
+      connectedOnceRef.current = true;
+      clearWelcomeTimer();
       setStatus('connected');
       return;
     }
-  }, []);
+  }, [clearWelcomeTimer]);
 
   const commitAdd = useCallback(
     async (peer: PeerEntry) => {
@@ -174,12 +222,17 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       for (const existing of peersRef.current.values()) {
         if (existing.id === peer.id) continue;
         if (leafIndexForIdentity(state, existing.identity) !== null) {
-          sendEnvelope(result.bundle.commit, existing.id);
+          if (!sendEnvelope(result.bundle.commit, existing.id)) {
+            requestReconnect('MLS commit send failed');
+            return;
+          }
         }
       }
-      sendEnvelope(result.bundle.welcome, peer.id);
+      if (!sendEnvelope(result.bundle.welcome, peer.id)) {
+        requestReconnect('MLS welcome send failed');
+      }
     },
-    [sendEnvelope],
+    [requestReconnect, sendEnvelope],
   );
 
   const commitPendingAdds = useCallback(async () => {
@@ -197,9 +250,11 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       if (leafIndex === null) return;
       const result = await removeMember(state, leafIndex);
       mlsStateRef.current = result.state;
-      sendEnvelope(result.commit);
+      if (!sendEnvelope(result.commit)) {
+        requestReconnect('MLS remove send failed');
+      }
     },
-    [sendEnvelope],
+    [requestReconnect, sendEnvelope],
   );
 
   const announceNickname = useCallback(async () => {
@@ -212,11 +267,14 @@ export function useRoom(roomId: string, nickname: string): RoomState {
         text: '',
       });
       mlsStateRef.current = result.state;
-      sendEnvelope(result.envelope);
+      if (!sendEnvelope(result.envelope)) {
+        requestReconnect('MLS nickname send failed');
+      }
     } catch (e) {
       console.warn('MLS nickname announcement failed', e);
+      requestReconnect('MLS nickname failed');
     }
-  }, [sendEnvelope]);
+  }, [requestReconnect, sendEnvelope]);
 
   const prunePendingAdds = useCallback(() => {
     const state = mlsStateRef.current;
@@ -233,8 +291,10 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     if (!identity || mlsStateRef.current || peersRef.current.size > 0) return;
     mlsStateRef.current = await createInitialGroup(roomId, identity);
     readyRef.current = true;
+    connectedOnceRef.current = true;
+    clearWelcomeTimer();
     setStatus('connected');
-  }, [roomId]);
+  }, [clearWelcomeTimer, roomId]);
 
   const processMlsEnvelope = useCallback(
     async (from: string, envelope: string, ts: number) => {
@@ -270,148 +330,229 @@ export function useRoom(roomId: string, nickname: string): RoomState {
         await commitPendingAdds();
       } catch (e) {
         console.warn('MLS envelope failed', e);
+        requestReconnect('MLS envelope failed');
       }
     },
-    [announceNickname, commitPendingAdds, pushLine, tryJoinPendingWelcome],
+    [
+      announceNickname,
+      commitPendingAdds,
+      pushLine,
+      requestReconnect,
+      tryJoinPendingWelcome,
+    ],
   );
 
   useEffect(() => {
     let alive = true;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    let connecting = false;
+    let manualClose = false;
+    let outageNotified = false;
+    let offMsg: (() => void) | null = null;
+    let offClose: (() => void) | null = null;
 
-    const client = new WsClient();
-    clientRef.current = client;
+    const cleanupClient = () => {
+      offMsg?.();
+      offClose?.();
+      offMsg = null;
+      offClose = null;
+      manualClose = true;
+      clientRef.current?.close();
+      clientRef.current = null;
+      manualClose = false;
+    };
 
-    const offMsg = client.onMessage((msg) => {
-      if (!alive) return;
-      enqueue(async () => {
-        switch (msg.type) {
-          case 'joined': {
-            myIdRef.current = msg.your_id;
-            setMyId(msg.your_id);
-            setNicknames((prev) => ({
-              ...prev,
-              [msg.your_id]: nicknameRef.current,
-            }));
-            for (const m of msg.members) {
-              const kp = decodeKeyPackage(m.public_key);
-              if (!kp) continue;
-              peersRef.current.set(m.id, {
-                id: m.id,
-                keyPackage: kp,
-                encodedKeyPackage: m.public_key,
-                identity: identityForKeyPackage(kp),
-              });
-            }
-            refreshRoster();
-            await bootstrapIfAlone();
-            await commitPendingAdds();
-            await announceNickname();
-            pushLine({
-              kind: 'system',
-              id: nextLineId(),
-              text: `joined room "${roomId}" - ${msg.members.length + 1} here`,
-            });
-            break;
-          }
-          case 'member_joined': {
-            const kp = decodeKeyPackage(msg.public_key);
-            if (!kp) return;
-            const peer: PeerEntry = {
-              id: msg.id,
-              keyPackage: kp,
-              encodedKeyPackage: msg.public_key,
-              identity: identityForKeyPackage(kp),
-            };
-            peersRef.current.set(msg.id, peer);
-            pendingAddsRef.current.set(msg.id, peer);
-            refreshRoster();
-            await commitPendingAdds();
-            pushLine({
-              kind: 'system',
-              id: nextLineId(),
-              text: 'someone joined',
-            });
-            break;
-          }
-          case 'member_left': {
-            const peer = peersRef.current.get(msg.id);
-            peersRef.current.delete(msg.id);
-            pendingAddsRef.current.delete(msg.id);
-            setNicknames((prev) => {
-              if (!(msg.id in prev)) return prev;
-              const { [msg.id]: _drop, ...rest } = prev;
-              return rest;
-            });
-            refreshRoster();
-            if (peer && isSponsor()) {
-              await commitRemove(peer);
-            }
-            await commitPendingAdds();
-            pushLine({
-              kind: 'system',
-              id: nextLineId(),
-              text: 'someone left',
-            });
-            break;
-          }
-          case 'message': {
-            await processMlsEnvelope(msg.from, msg.envelope, msg.ts);
-            break;
-          }
-          case 'error': {
-            pushLine({
-              kind: 'system',
-              id: nextLineId(),
-              text: `error: ${msg.reason}`,
-            });
-            break;
-          }
-        }
-      });
-    });
-
-    const offClose = client.onClose(() => {
-      if (!alive) return;
-      setStatus('closed');
-      pushLine({
-        kind: 'system',
-        id: nextLineId(),
-        text: 'disconnected',
-      });
-    });
-
-    createMlsIdentity(`member:${crypto.randomUUID()}`)
-      .then((identity) => {
-        if (!alive) return;
-        identityRef.current = identity;
-        return client.connect().then(() => {
-          client.send({
-            type: 'join',
-            room: roomId,
-            public_key: identity.encodedKeyPackage,
-          });
+    const scheduleReconnect = (reason?: string) => {
+      if (!alive || reconnectTimer !== null) return;
+      clearWelcomeTimer();
+      readyRef.current = false;
+      setStatus('reconnecting');
+      if (connectedOnceRef.current && !outageNotified) {
+        outageNotified = true;
+        pushLine({
+          kind: 'system',
+          id: nextLineId(),
+          text: reason ? `${reason} - reconnecting` : 'disconnected - reconnecting',
         });
-      })
-      .catch((e) => {
-        console.warn('room connect failed', e);
-        if (alive) setStatus('closed');
+      }
+      const delay = reconnectDelayMs(reconnectAttempt++);
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        if (!alive) return;
+        void connectOnce();
+      }, delay);
+    };
+
+    reconnectRef.current = (reason: string) => {
+      if (!alive) return;
+      cleanupClient();
+      scheduleReconnect(reason);
+    };
+
+    const connectOnce = async () => {
+      if (!alive || connecting) return;
+      connecting = true;
+      setStatus(connectedOnceRef.current ? 'reconnecting' : 'connecting');
+      cleanupClient();
+
+      const client = new WsClient();
+      clientRef.current = client;
+
+      offMsg = client.onMessage((msg) => {
+        if (!alive) return;
+        enqueue(async () => {
+          switch (msg.type) {
+            case 'joined': {
+              const wasReconnecting = connectedOnceRef.current;
+              myIdRef.current = msg.your_id;
+              setMyId(msg.your_id);
+              setNicknames((prev) => ({
+                ...prev,
+                [msg.your_id]: nicknameRef.current,
+              }));
+              for (const m of msg.members) {
+                const kp = decodeKeyPackage(m.public_key);
+                if (!kp) continue;
+                if (m.id === msg.your_id) continue;
+                peersRef.current.set(m.id, {
+                  id: m.id,
+                  keyPackage: kp,
+                  encodedKeyPackage: m.public_key,
+                  identity: identityForKeyPackage(kp),
+                });
+              }
+              refreshRoster();
+              await bootstrapIfAlone();
+              if (!mlsStateRef.current && peersRef.current.size > 0) {
+                armWelcomeTimeout();
+              }
+              await commitPendingAdds();
+              await announceNickname();
+              outageNotified = false;
+              pushLine({
+                kind: 'system',
+                id: nextLineId(),
+                text: `${wasReconnecting ? 'rejoined' : 'joined'} room "${roomId}" - ${
+                  msg.members.length + 1
+                } here`,
+              });
+              break;
+            }
+            case 'member_joined': {
+              if (msg.id === myIdRef.current) return;
+              const kp = decodeKeyPackage(msg.public_key);
+              if (!kp) return;
+              const peer: PeerEntry = {
+                id: msg.id,
+                keyPackage: kp,
+                encodedKeyPackage: msg.public_key,
+                identity: identityForKeyPackage(kp),
+              };
+              peersRef.current.set(msg.id, peer);
+              pendingAddsRef.current.set(msg.id, peer);
+              refreshRoster();
+              if (!mlsStateRef.current) {
+                armWelcomeTimeout();
+              }
+              await commitPendingAdds();
+              pushLine({
+                kind: 'system',
+                id: nextLineId(),
+                text: 'someone joined',
+              });
+              break;
+            }
+            case 'member_left': {
+              if (msg.id === myIdRef.current) return;
+              const peer = peersRef.current.get(msg.id);
+              peersRef.current.delete(msg.id);
+              pendingAddsRef.current.delete(msg.id);
+              refreshRoster();
+              if (!mlsStateRef.current && peersRef.current.size === 0) {
+                await bootstrapIfAlone();
+              } else if (!mlsStateRef.current) {
+                armWelcomeTimeout();
+              }
+              if (peer && isSponsor()) {
+                await commitRemove(peer);
+              }
+              await commitPendingAdds();
+              pushLine({
+                kind: 'system',
+                id: nextLineId(),
+                text: 'someone left',
+              });
+              break;
+            }
+            case 'message': {
+              await processMlsEnvelope(msg.from, msg.envelope, msg.ts);
+              break;
+            }
+            case 'error': {
+              pushLine({
+                kind: 'system',
+                id: nextLineId(),
+                text: `error: ${msg.reason}`,
+              });
+              break;
+            }
+          }
+        });
       });
+
+      offClose = client.onClose(() => {
+        if (!alive) return;
+        if (clientRef.current === client) clientRef.current = null;
+        if (manualClose) return;
+        scheduleReconnect();
+      });
+
+      try {
+        const identity = await createMlsIdentity(`member:${crypto.randomUUID()}`);
+        if (!alive || clientRef.current !== client) return;
+        await queueRef.current;
+        if (!alive || clientRef.current !== client) return;
+        resetCryptoForJoin(identity);
+        await client.connect();
+        if (!alive || clientRef.current !== client) return;
+        client.send({
+          type: 'join',
+          room: roomId,
+          public_key: identity.encodedKeyPackage,
+        });
+        reconnectAttempt = 0;
+      } catch (e) {
+        console.warn('room connect failed', e);
+        if (!alive || clientRef.current !== client) return;
+        client.close();
+        scheduleReconnect('room connect failed');
+      } finally {
+        connecting = false;
+      }
+    };
+
+    void connectOnce();
 
     return () => {
       alive = false;
-      offMsg();
-      offClose();
-      client.close();
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      clearWelcomeTimer();
+      reconnectRef.current = null;
+      cleanupClient();
     };
   }, [
     announceNickname,
     bootstrapIfAlone,
     commitPendingAdds,
     commitRemove,
+    armWelcomeTimeout,
+    clearWelcomeTimer,
     isSponsor,
     processMlsEnvelope,
     pushLine,
     refreshRoster,
+    resetCryptoForJoin,
     roomId,
     enqueue,
   ]);
@@ -443,28 +584,32 @@ export function useRoom(roomId: string, nickname: string): RoomState {
           image: opts?.image,
         };
 
-        pushLine({
-          kind: 'msg',
-          id: nextLineId(),
-          senderId: me,
-          nickname: payload.nickname,
-          text: payload.text,
-          ts: Date.now(),
-          mine: true,
-          replyTo: opts?.replyTo,
-          image: opts?.image,
-        });
-
         try {
           const result = await encryptPayload(state, payload);
           mlsStateRef.current = result.state;
-          sendEnvelope(result.envelope);
+          const sent = sendEnvelope(result.envelope);
+          if (!sent) {
+            requestReconnect('send failed');
+            return;
+          }
+          pushLine({
+            kind: 'msg',
+            id: nextLineId(),
+            senderId: me,
+            nickname: payload.nickname,
+            text: payload.text,
+            ts: Date.now(),
+            mine: true,
+            replyTo: opts?.replyTo,
+            image: opts?.image,
+          });
         } catch (e) {
           console.warn('MLS send failed', e);
+          requestReconnect('MLS send failed');
         }
       });
     },
-    [enqueue, pushLine, sendEnvelope],
+    [enqueue, pushLine, requestReconnect, sendEnvelope],
   );
 
   return { status, myId, members, nicknames, lines, send };

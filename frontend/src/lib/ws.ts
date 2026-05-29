@@ -34,12 +34,21 @@ export class WsClient {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const url = `${proto}://${location.host}/ws`;
       const ws = new WebSocket(url);
+      let opened = false;
+      let settled = false;
       this.ws = ws;
       ws.onopen = () => {
+        opened = true;
+        settled = true;
         this.openListeners.forEach((l) => l());
         resolve();
       };
-      ws.onerror = (e) => reject(e);
+      ws.onerror = (e) => {
+        if (!settled) {
+          settled = true;
+          reject(e);
+        }
+      };
       ws.onmessage = (ev) => {
         try {
           const msg: ServerMsg = JSON.parse(ev.data);
@@ -49,14 +58,29 @@ export class WsClient {
         }
       };
       ws.onclose = () => {
+        if (this.ws === ws) this.ws = null;
+        if (!opened && !settled) {
+          settled = true;
+          reject(new Error('websocket closed before open'));
+        }
         this.closeListeners.forEach((l) => l());
       };
     });
   }
 
-  send(msg: ClientMsg): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify(msg));
+  send(msg: ClientMsg): boolean {
+    if (!this.isOpen()) return false;
+    this.ws!.send(JSON.stringify(msg));
+    return true;
+  }
+
+  isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  onOpen(cb: () => void): () => void {
+    this.openListeners.add(cb);
+    return () => this.openListeners.delete(cb);
   }
 
   onMessage(cb: (m: ServerMsg) => void): () => void {

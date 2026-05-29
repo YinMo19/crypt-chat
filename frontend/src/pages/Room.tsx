@@ -80,6 +80,7 @@ function RoomInner({ roomId, nickname }: { roomId: string; nickname: string }) {
         <div>
           {status === 'connected' && `${members.length} here`}
           {status === 'connecting' && 'connecting…'}
+          {status === 'reconnecting' && 'reconnecting…'}
           {status === 'closed' && 'disconnected'}
         </div>
       </header>

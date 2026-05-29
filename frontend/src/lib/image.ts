@@ -2,19 +2,19 @@
  * Client-side image compression.
  *
  * Goals:
- *   - Cap source size at 5 MiB (raw input from user).
+ *   - Cap source size at 20 MiB (raw input from user).
  *   - Resize to fit within 1600×1600 max side (preserves aspect ratio).
  *   - Re-encode as JPEG at quality 0.82, falling back to lower quality
  *     if the result is still over the target size.
  *   - Output stays well under 1.2 MiB so envelope after base64 + JSON +
- *     ws frame stays under the 4 MiB server cap.
+ *     ws frame stays under the 6 MiB server cap.
  *
  * The output is a base64 data string (no `data:` prefix; mime is separate).
  * Server is opaque to all of this — image bytes ride inside the encrypted
  * payload like text does.
  */
 
-export const MAX_IMAGE_SOURCE_BYTES = 5 * 1024 * 1024; // 5 MiB
+export const MAX_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024; // 20 MiB
 const MAX_DIMENSION = 1600;
 const TARGET_OUTPUT_BYTES = 1_200_000; // ~1.2 MiB
 const QUALITY_STEPS = [0.82, 0.7, 0.6, 0.5, 0.4];
