@@ -1,5 +1,4 @@
 import {
-  MouseEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -265,7 +264,7 @@ function Row({
     return <div className="italic text-neutral-500 py-0.5">{line.text}</div>;
   }
 
-  const onMouseEnter = (_e: MouseEvent<HTMLDivElement>) => {
+  const onMouseEnter = () => {
     if (timerRef.current !== null) clearTimeout(timerRef.current);
     timerRef.current = window.setTimeout(() => {
       const el = rowRef.current;

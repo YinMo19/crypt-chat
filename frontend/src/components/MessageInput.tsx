@@ -1,7 +1,6 @@
 import {
   ChangeEvent,
   ClipboardEvent,
-  CompositionEvent,
   FormEvent,
   KeyboardEvent,
   useEffect,
@@ -238,10 +237,10 @@ export function MessageInput({
     return Date.now() - lastCompositionEndRef.current < IME_GRACE_MS;
   };
 
-  const onCompositionStart = (_e: CompositionEvent<HTMLTextAreaElement>) => {
+  const onCompositionStart = () => {
     composingRef.current = true;
   };
-  const onCompositionEnd = (_e: CompositionEvent<HTMLTextAreaElement>) => {
+  const onCompositionEnd = () => {
     composingRef.current = false;
     lastCompositionEndRef.current = Date.now();
   };

@@ -217,11 +217,13 @@ export function useRoom(roomId: string, nickname: string): RoomState {
 
   const enqueue = useCallback(<T,>(work: () => Promise<T>): Promise<T | null> => {
     const task = queueRef.current.then(work);
-    queueRef.current = task
-      .then(() => undefined)
-      .catch((e) => {
-        console.warn('room task failed', e);
-      });
+    // Reset the queue baseline to a Promise<void>: discard the success
+    // value, swallow + log the rejection. Without the success-side mapper
+    // TS keeps T in the union and the assignment to Promise<void> fails.
+    queueRef.current = task.then(
+      () => {},
+      (e) => console.warn('room task failed', e),
+    );
     return task.catch(() => null);
   }, []);
 

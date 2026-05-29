@@ -118,9 +118,6 @@ export function parseMessage(input: string): MessageSegment[] {
   }
 
   flushText();
-  // If we somehow produced nothing (empty message), return an empty text seg
-  // so the renderer still has something to map.
-  if (segments.length === 0) segments.push({ kind: 'text', body: '' });
   return segments;
 }
 

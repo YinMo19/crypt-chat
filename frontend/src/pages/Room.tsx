@@ -10,18 +10,25 @@ import { isValidRoomId, normalizeRoomId } from '../lib/roomId';
 
 export function Room() {
   const { roomId } = useParams<{ roomId: string }>();
-  const [nickname] = useState(() =>
-    cleanNickname(sessionStorage.getItem('nickname') ?? ''),
-  );
 
+  // Route-level early exits BEFORE any hook so that future additions can't
+  // accidentally violate the rules-of-hooks ordering. None of these depend
+  // on component state.
   if (!roomId) return <Navigate to="/" replace />;
-
   // Non-canonical room ids bounce to /r/<normalized>. We don't allow short
   // rooms — see lib/roomId.ts for why. The Navigate is `replace` so the
   // browser back button doesn't bounce back to the un-padded URL.
   if (!isValidRoomId(roomId)) {
     return <Navigate to={`/r/${normalizeRoomId(roomId)}`} replace />;
   }
+
+  return <RoomGate roomId={roomId} />;
+}
+
+function RoomGate({ roomId }: { roomId: string }) {
+  const [nickname] = useState(() =>
+    cleanNickname(sessionStorage.getItem('nickname') ?? ''),
+  );
 
   // No nickname: redirect to landing with the room id in router state.
   if (!nickname)
