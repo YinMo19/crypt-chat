@@ -1,0 +1,19 @@
+# Rust
+/target
+
+# Node / Vite
+frontend/node_modules
+frontend/dist
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode
+*.swp
+
+# Local env
+.env
+.env.local
+
+# Logs
+*.log

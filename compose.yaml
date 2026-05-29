@@ -1,0 +1,37 @@
+# podman-compose / docker compose configuration for crypt-chat.
+#
+# Bring up:    podman compose up -d
+# Update:      podman compose pull && podman compose up -d --force-recreate
+# Tear down:   podman compose down
+#
+# Configuration goes into a sibling .env file (see .env.example).
+
+services:
+  crypt-chat:
+    image: ghcr.io/${IMAGE_OWNER}/crypt-chat:${IMAGE_TAG:-latest}
+    container_name: crypt-chat
+    restart: unless-stopped
+    pull_policy: always
+    ports:
+      # Bind to ${HOST_PORT} on the host, container always listens on 8080.
+      - "${HOST_PORT:-8080}:8080"
+    # The binary already takes --addr/--port via CLI; we set them via the
+    # default CMD in the image. Override here only if a deployer wants to
+    # change them.
+    # Soft resource caps. crypt-chat is single-process and very light;
+    # these limits exist mainly to bound a runaway and to make it obvious
+    # in `podman stats` what the workload looks like.
+    mem_limit: 512m
+    cpus: 1.0
+    # Read-only root filesystem — the app does no disk I/O at all.
+    read_only: true
+    # Drop ambient capabilities; the binary needs none.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,96 @@
+@import '@fontsource-variable/jetbrains-mono/wght.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-neutral-900 text-neutral-100 antialiased;
+  /* JetBrains Mono Variable for Latin glyphs; system CJK falls back per-glyph
+     because JBM has no CJK coverage — the browser picks the next family that
+     has the codepoint. */
+  font-family:
+    'JetBrains Mono Variable',
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    'PingFang SC',
+    'Hiragino Sans GB',
+    'Microsoft YaHei',
+    'Noto Sans CJK SC',
+    sans-serif;
+  /* Slightly tighter line-height for monospace UI density. */
+  line-height: 1.55;
+}
+
+input,
+textarea,
+button {
+  @apply outline-none focus:outline-none;
+  font-family: inherit;
+}
+
+/*
+ * Inline syntax-highlight palette for code fences. We do NOT wrap code
+ * blocks in a card/border — the surrounding page is already monospace, so
+ * a subtle palette is enough to separate code from prose.
+ *
+ * Hand-tuned for the neutral-900 (#171717) backdrop. No backgrounds, no
+ * borders, no padding changes — only color hints on hljs token classes.
+ */
+.hljs {
+  color: #f5f5f5;
+}
+.hljs-comment,
+.hljs-quote {
+  color: #6b7280; /* neutral-500 */
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link {
+  color: #c4a7e7; /* soft violet */
+}
+.hljs-string,
+.hljs-attr,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-meta,
+.hljs-addition {
+  color: #f6c177; /* warm sand */
+}
+.hljs-number,
+.hljs-regexp,
+.hljs-built_in {
+  color: #9ccfd8; /* cool teal */
+}
+.hljs-name,
+.hljs-tag,
+.hljs-title,
+.hljs-class .hljs-title,
+.hljs-type {
+  color: #ebbcba; /* warm rose */
+}
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attribute {
+  color: #e0def4; /* near-white lavender */
+}
+.hljs-deletion {
+  color: #eb6f92;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: bold;
+}
