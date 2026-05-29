@@ -1,65 +1,36 @@
 /**
  * Room state hook.
  *
- * Sender Keys protocol (see lib/crypto.ts for wire format) — extended:
+ * End-to-end encryption is handled by MLS (RFC 9420) via ts-mls. The server
+ * still only sees opaque bytes:
  *
- *   Frame kinds in flight:
- *     KEY  : wrap-and-deliver our sender key to one peer (ECDH+HKDF KEK)
- *     MSG  : a chat message under our sender key
- *     NICK : announce our nickname under our sender key
+ *   join.public_key: base64 MLS KeyPackage
+ *   relay envelope : base64 MLS private message / commit / welcome
  *
- *   On join:
- *     1. Generate keypair + sender key + nonce salt.
- *     2. Send `join`, wait for `joined` (with roster).
- *     3. For each existing peer: send a KEY frame addressed to them.
- *     4. Broadcast a NICK frame (so everyone, including future joiners
- *        whose `KEY` from us they receive, can resolve our id → name).
- *
- *   On `member_joined`:
- *     - Send our KEY directly to them.
- *     - Send our NICK directly to them. (Saves them from waiting for our
- *       next chat message before they can render us in the @ list.)
- *
- *   On `member_left`:
- *     - Remove them from the roster.
- *     - Generate a fresh sender key and nonce salt, then redistribute the new
- *       key to the remaining peers. Future messages are no longer decryptable
- *       with keys the departed member learned while present.
- *
- *   On incoming `message`:
- *     - kind=KEY  : unwrap and store peer.senderKey
- *     - kind=MSG  : decrypt with peer.senderKey, push line with server ts
- *     - kind=NICK : decrypt with peer.senderKey, store nicknames[from]
- *
- *   On send(text, replyTo?):
- *     - One AES-GCM encrypt with our sender key + counter — O(1).
- *     - Echo to our own UI immediately.
+ * The current sponsor is the lexicographically-smallest member id in the
+ * roster. Sponsors commit add/remove changes; every member processes the MLS
+ * commit and advances to the new epoch. This replaces the previous all-peers
+ * sender-key redistribution on leave.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { PlaintextPayload, ReplyRef, type ImageAttachment } from './crypto';
 import {
-  ImageAttachment,
-  KeyPair,
-  PlaintextPayload,
-  ReplyRef,
-  b64decode,
-  b64encode,
-  buildKeyFrame,
-  buildMsgFrame,
-  buildNickFrame,
-  FRAME_KIND_KEY,
-  FRAME_KIND_MSG,
-  FRAME_KIND_NICK,
-  frameKind,
-  generateKeyPair,
-  generateSenderKey,
-  openKeyFrame,
-  openMsgFrame,
-  openNickFrame,
-} from './crypto';
-import { randomBytes } from '@noble/hashes/utils';
+  addMember,
+  createInitialGroup,
+  createMlsIdentity,
+  decodeKeyPackage,
+  encryptPayload,
+  identityForKeyPackage,
+  joinFromWelcome,
+  leafIndexForIdentity,
+  processEnvelope,
+  removeMember,
+  type MlsIdentity,
+} from './mls';
 import { cleanNickname } from './nickname';
 import { WsClient, type MemberInfo } from './ws';
+import type { ClientState, KeyPackage } from 'ts-mls';
 
 export type ChatLine =
   | {
@@ -77,8 +48,9 @@ export type ChatLine =
 
 interface PeerEntry {
   id: string;
-  publicKey: Uint8Array;
-  senderKey: Uint8Array | null;
+  keyPackage: KeyPackage;
+  encodedKeyPackage: string;
+  identity: string;
 }
 
 let lineCounter = 0;
@@ -90,7 +62,7 @@ export interface RoomState {
   /** Full roster including me. Stable across re-renders only when the set
    * of ids changes; consumers should treat the array as immutable. */
   members: MemberInfo[];
-  /** id → nickname map. Self always present. */
+  /** id -> nickname map. Self always present. */
   nicknames: Record<string, string>;
   lines: ChatLine[];
   send: (
@@ -106,14 +78,16 @@ export function useRoom(roomId: string, nickname: string): RoomState {
   const [nicknames, setNicknames] = useState<Record<string, string>>({});
   const [lines, setLines] = useState<ChatLine[]>([]);
 
-  const keypairRef = useRef<KeyPair | null>(null);
-  const senderKeyRef = useRef<Uint8Array | null>(null);
-  const nonceSaltRef = useRef<Uint8Array | null>(null);
-  const counterRef = useRef<bigint>(0n);
+  const identityRef = useRef<MlsIdentity | null>(null);
+  const mlsStateRef = useRef<ClientState | null>(null);
   const peersRef = useRef<Map<string, PeerEntry>>(new Map());
+  const pendingAddsRef = useRef<Map<string, PeerEntry>>(new Map());
+  const pendingWelcomesRef = useRef<string[]>([]);
   const clientRef = useRef<WsClient | null>(null);
   const myIdRef = useRef<string | null>(null);
-  const nicknameRef = useRef(nickname);
+  const nicknameRef = useRef(cleanNickname(nickname));
+  const readyRef = useRef(false);
+  const queueRef = useRef(Promise.resolve());
 
   useEffect(() => {
     nicknameRef.current = cleanNickname(nickname);
@@ -129,184 +103,271 @@ export function useRoom(roomId: string, nickname: string): RoomState {
 
   const refreshRoster = useCallback(() => {
     const me = myIdRef.current;
+    const identity = identityRef.current;
     const out: MemberInfo[] = [];
-    if (me) {
-      const meKp = keypairRef.current;
-      if (meKp) out.push({ id: me, public_key: b64encode(meKp.publicKey) });
+    if (me && identity) {
+      out.push({ id: me, public_key: identity.encodedKeyPackage });
     }
     for (const peer of peersRef.current.values()) {
-      out.push({ id: peer.id, public_key: b64encode(peer.publicKey) });
+      out.push({ id: peer.id, public_key: peer.encodedKeyPackage });
     }
-    setMembers(out);
+    setMembers(out.sort((a, b) => a.id.localeCompare(b.id)));
   }, []);
 
-  /** Send our sender key to a single peer (KEY frame). */
-  const sendKeyTo = useCallback((peer: PeerEntry) => {
-    const client = clientRef.current;
-    const kp = keypairRef.current;
-    const sk = senderKeyRef.current;
-    if (!client || !kp || !sk) return;
-    const envelope = buildKeyFrame(kp.privateKey, peer.publicKey, sk);
-    client.send({ type: 'relay', to: peer.id, envelope });
+  const enqueue = useCallback((work: () => Promise<void>) => {
+    queueRef.current = queueRef.current
+      .then(work)
+      .catch((e) => console.warn('room task failed', e));
   }, []);
 
-  /** Build and send a NICK frame. With `to` it unicasts; without, broadcasts. */
-  const sendNick = useCallback((to?: string) => {
-    const client = clientRef.current;
-    const sk = senderKeyRef.current;
-    const salt = nonceSaltRef.current;
-    if (!client || !sk || !salt) return;
-    const counter = counterRef.current;
-    counterRef.current = counter + 1n;
-    const envelope = buildNickFrame(sk, salt, counter, nicknameRef.current);
-    client.send({ type: 'relay', to, envelope });
-  }, []);
-
-  const rekeySender = useCallback(() => {
-    const oldKey = senderKeyRef.current;
-    const oldSalt = nonceSaltRef.current;
-    senderKeyRef.current = generateSenderKey();
-    nonceSaltRef.current = randomBytes(4);
-    counterRef.current = 0n;
-    oldKey?.fill(0);
-    oldSalt?.fill(0);
-
+  const sponsorId = useCallback((): string | null => {
+    const state = mlsStateRef.current;
+    if (!state) return null;
+    const ids: string[] = [];
+    const me = myIdRef.current;
+    const identity = identityRef.current;
+    if (
+      me &&
+      identity &&
+      leafIndexForIdentity(state, identity.identity) !== null
+    ) {
+      ids.push(me);
+    }
     for (const peer of peersRef.current.values()) {
-      sendKeyTo(peer);
+      if (leafIndexForIdentity(state, peer.identity) !== null) {
+        ids.push(peer.id);
+      }
     }
-  }, [sendKeyTo]);
+    ids.sort();
+    return ids[0] ?? null;
+  }, []);
+
+  const isSponsor = useCallback(() => {
+    const me = myIdRef.current;
+    return !!me && sponsorId() === me;
+  }, [sponsorId]);
+
+  const sendEnvelope = useCallback((envelope: string, to?: string) => {
+    clientRef.current?.send({ type: 'relay', to, envelope });
+  }, []);
+
+  const tryJoinPendingWelcome = useCallback(async () => {
+    if (mlsStateRef.current || !identityRef.current) return;
+    while (pendingWelcomesRef.current.length > 0) {
+      const welcome = pendingWelcomesRef.current.shift()!;
+      const state = await joinFromWelcome(welcome, identityRef.current);
+      if (!state) continue;
+      mlsStateRef.current = state;
+      readyRef.current = true;
+      setStatus('connected');
+      return;
+    }
+  }, []);
+
+  const commitAdd = useCallback(
+    async (peer: PeerEntry) => {
+      const state = mlsStateRef.current;
+      if (!state) return;
+      const result = await addMember(state, peer.keyPackage);
+      mlsStateRef.current = result.state;
+      pendingAddsRef.current.delete(peer.id);
+      for (const existing of peersRef.current.values()) {
+        if (existing.id === peer.id) continue;
+        if (leafIndexForIdentity(state, existing.identity) !== null) {
+          sendEnvelope(result.bundle.commit, existing.id);
+        }
+      }
+      sendEnvelope(result.bundle.welcome, peer.id);
+    },
+    [sendEnvelope],
+  );
+
+  const commitPendingAdds = useCallback(async () => {
+    if (!isSponsor() || !mlsStateRef.current) return;
+    for (const peer of Array.from(pendingAddsRef.current.values())) {
+      await commitAdd(peer);
+    }
+  }, [commitAdd, isSponsor]);
+
+  const commitRemove = useCallback(
+    async (peer: PeerEntry) => {
+      const state = mlsStateRef.current;
+      if (!state) return;
+      const leafIndex = leafIndexForIdentity(state, peer.identity);
+      if (leafIndex === null) return;
+      const result = await removeMember(state, leafIndex);
+      mlsStateRef.current = result.state;
+      sendEnvelope(result.commit);
+    },
+    [sendEnvelope],
+  );
+
+  const announceNickname = useCallback(async () => {
+    const state = mlsStateRef.current;
+    const me = myIdRef.current;
+    if (!state || !me || !readyRef.current) return;
+    try {
+      const result = await encryptPayload(state, {
+        nickname: nicknameRef.current,
+        text: '',
+      });
+      mlsStateRef.current = result.state;
+      sendEnvelope(result.envelope);
+    } catch (e) {
+      console.warn('MLS nickname announcement failed', e);
+    }
+  }, [sendEnvelope]);
+
+  const prunePendingAdds = useCallback(() => {
+    const state = mlsStateRef.current;
+    if (!state) return;
+    for (const [id, peer] of pendingAddsRef.current) {
+      if (leafIndexForIdentity(state, peer.identity) !== null) {
+        pendingAddsRef.current.delete(id);
+      }
+    }
+  }, []);
+
+  const bootstrapIfAlone = useCallback(async () => {
+    const identity = identityRef.current;
+    if (!identity || mlsStateRef.current || peersRef.current.size > 0) return;
+    mlsStateRef.current = await createInitialGroup(roomId, identity);
+    readyRef.current = true;
+    setStatus('connected');
+  }, [roomId]);
+
+  const processMlsEnvelope = useCallback(
+    async (from: string, envelope: string, ts: number) => {
+      if (!mlsStateRef.current) {
+        pendingWelcomesRef.current.push(envelope);
+        await tryJoinPendingWelcome();
+        await announceNickname();
+        return;
+      }
+      try {
+        const processed = await processEnvelope(mlsStateRef.current, envelope);
+        mlsStateRef.current = processed.state;
+        prunePendingAdds();
+        if (processed.result?.kind === 'app') {
+          const payload = processed.result.payload;
+          const cleanNick = cleanNickname(payload.nickname) || from.slice(0, 6);
+          setNicknames((prev) => ({ ...prev, [from]: cleanNick }));
+          if (!payload.text && !payload.image && !payload.replyTo) {
+            return;
+          }
+          pushLine({
+            kind: 'msg',
+            id: nextLineId(),
+            senderId: from,
+            nickname: cleanNick,
+            text: payload.text,
+            ts,
+            mine: false,
+            replyTo: payload.replyTo,
+            image: payload.image,
+          });
+        }
+        await commitPendingAdds();
+      } catch (e) {
+        console.warn('MLS envelope failed', e);
+      }
+    },
+    [announceNickname, commitPendingAdds, pushLine, tryJoinPendingWelcome],
+  );
 
   useEffect(() => {
     let alive = true;
-    const kp = generateKeyPair();
-    const sk = generateSenderKey();
-    const salt = randomBytes(4);
-    keypairRef.current = kp;
-    senderKeyRef.current = sk;
-    nonceSaltRef.current = salt;
-    counterRef.current = 0n;
 
     const client = new WsClient();
     clientRef.current = client;
 
     const offMsg = client.onMessage((msg) => {
       if (!alive) return;
-      switch (msg.type) {
-        case 'joined': {
-          myIdRef.current = msg.your_id;
-          setMyId(msg.your_id);
-          // Self into nickname map.
-          setNicknames((prev) => ({ ...prev, [msg.your_id]: nicknameRef.current }));
-          for (const m of msg.members) {
-            const peer: PeerEntry = {
-              id: m.id,
-              publicKey: b64decode(m.public_key),
-              senderKey: null,
-            };
-            peersRef.current.set(m.id, peer);
-            // Distribute our sender key to each existing peer.
-            sendKeyTo(peer);
-          }
-          // Announce our nickname to the room. Existing peers will be able
-          // to decrypt this once their `KEY` from us above has landed.
-          // (KEY is sent before NICK in the same task tick, and the server
-          // preserves order on a single connection.)
-          sendNick();
-          refreshRoster();
-          setStatus('connected');
-          pushLine({
-            kind: 'system',
-            id: nextLineId(),
-            text: `joined room "${roomId}" — ${msg.members.length + 1} here`,
-          });
-          break;
-        }
-        case 'member_joined': {
-          const peer: PeerEntry = {
-            id: msg.id,
-            publicKey: b64decode(msg.public_key),
-            senderKey: null,
-          };
-          peersRef.current.set(msg.id, peer);
-          // New peer needs both our key and our nickname.
-          sendKeyTo(peer);
-          sendNick(msg.id);
-          refreshRoster();
-          pushLine({
-            kind: 'system',
-            id: nextLineId(),
-            text: 'someone joined',
-          });
-          break;
-        }
-        case 'member_left': {
-          peersRef.current.delete(msg.id);
-          // Drop their nickname so the @ list stays accurate.
-          setNicknames((prev) => {
-            if (!(msg.id in prev)) return prev;
-            const { [msg.id]: _drop, ...rest } = prev;
-            return rest;
-          });
-          refreshRoster();
-          rekeySender();
-          pushLine({
-            kind: 'system',
-            id: nextLineId(),
-            text: 'someone left',
-          });
-          break;
-        }
-        case 'message': {
-          const peer = peersRef.current.get(msg.from);
-          if (!peer || !keypairRef.current) return;
-          const kind = frameKind(msg.envelope);
-          if (kind === FRAME_KIND_KEY) {
-            const newKey = openKeyFrame(
-              keypairRef.current.privateKey,
-              peer.publicKey,
-              msg.envelope,
-            );
-            if (newKey) peer.senderKey = newKey;
-            return;
-          }
-          if (!peer.senderKey) {
-            // Their KEY hasn't arrived yet — drop and rely on retry.
-            return;
-          }
-          if (kind === FRAME_KIND_NICK) {
-            const nick = openNickFrame(peer.senderKey, msg.envelope);
-            const cleanNick = nick ? cleanNickname(nick) : '';
-            if (cleanNick) {
-              setNicknames((prev) => ({ ...prev, [msg.from]: cleanNick }));
+      enqueue(async () => {
+        switch (msg.type) {
+          case 'joined': {
+            myIdRef.current = msg.your_id;
+            setMyId(msg.your_id);
+            setNicknames((prev) => ({
+              ...prev,
+              [msg.your_id]: nicknameRef.current,
+            }));
+            for (const m of msg.members) {
+              const kp = decodeKeyPackage(m.public_key);
+              if (!kp) continue;
+              peersRef.current.set(m.id, {
+                id: m.id,
+                keyPackage: kp,
+                encodedKeyPackage: m.public_key,
+                identity: identityForKeyPackage(kp),
+              });
             }
-            return;
-          }
-          if (kind === FRAME_KIND_MSG) {
-            const payload = openMsgFrame(peer.senderKey, msg.envelope);
-            if (!payload) return;
+            refreshRoster();
+            await bootstrapIfAlone();
+            await commitPendingAdds();
+            await announceNickname();
             pushLine({
-              kind: 'msg',
+              kind: 'system',
               id: nextLineId(),
-              senderId: msg.from,
-              nickname: cleanNickname(payload.nickname) || msg.from.slice(0, 6),
-              text: payload.text,
-              ts: msg.ts,
-              mine: false,
-              replyTo: payload.replyTo,
-              image: payload.image,
+              text: `joined room "${roomId}" - ${msg.members.length + 1} here`,
             });
+            break;
           }
-          break;
+          case 'member_joined': {
+            const kp = decodeKeyPackage(msg.public_key);
+            if (!kp) return;
+            const peer: PeerEntry = {
+              id: msg.id,
+              keyPackage: kp,
+              encodedKeyPackage: msg.public_key,
+              identity: identityForKeyPackage(kp),
+            };
+            peersRef.current.set(msg.id, peer);
+            pendingAddsRef.current.set(msg.id, peer);
+            refreshRoster();
+            await commitPendingAdds();
+            pushLine({
+              kind: 'system',
+              id: nextLineId(),
+              text: 'someone joined',
+            });
+            break;
+          }
+          case 'member_left': {
+            const peer = peersRef.current.get(msg.id);
+            peersRef.current.delete(msg.id);
+            pendingAddsRef.current.delete(msg.id);
+            setNicknames((prev) => {
+              if (!(msg.id in prev)) return prev;
+              const { [msg.id]: _drop, ...rest } = prev;
+              return rest;
+            });
+            refreshRoster();
+            if (peer && isSponsor()) {
+              await commitRemove(peer);
+            }
+            await commitPendingAdds();
+            pushLine({
+              kind: 'system',
+              id: nextLineId(),
+              text: 'someone left',
+            });
+            break;
+          }
+          case 'message': {
+            await processMlsEnvelope(msg.from, msg.envelope, msg.ts);
+            break;
+          }
+          case 'error': {
+            pushLine({
+              kind: 'system',
+              id: nextLineId(),
+              text: `error: ${msg.reason}`,
+            });
+            break;
+          }
         }
-        case 'error': {
-          pushLine({
-            kind: 'system',
-            id: nextLineId(),
-            text: `error: ${msg.reason}`,
-          });
-          break;
-        }
-      }
+      });
     });
 
     const offClose = client.onClose(() => {
@@ -319,16 +380,20 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       });
     });
 
-    client
-      .connect()
-      .then(() => {
-        client.send({
-          type: 'join',
-          room: roomId,
-          public_key: b64encode(kp.publicKey),
+    createMlsIdentity(`member:${crypto.randomUUID()}`)
+      .then((identity) => {
+        if (!alive) return;
+        identityRef.current = identity;
+        return client.connect().then(() => {
+          client.send({
+            type: 'join',
+            room: roomId,
+            public_key: identity.encodedKeyPackage,
+          });
         });
       })
-      .catch(() => {
+      .catch((e) => {
+        console.warn('room connect failed', e);
         if (alive) setStatus('closed');
       });
 
@@ -338,60 +403,68 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       offClose();
       client.close();
     };
-  }, [roomId, pushLine, refreshRoster, rekeySender, sendKeyTo, sendNick]);
+  }, [
+    announceNickname,
+    bootstrapIfAlone,
+    commitPendingAdds,
+    commitRemove,
+    isSponsor,
+    processMlsEnvelope,
+    pushLine,
+    refreshRoster,
+    roomId,
+    enqueue,
+  ]);
 
-  // If our nickname changed mid-session, broadcast it again.
   useEffect(() => {
-    if (status === 'connected') {
-      sendNick();
-      const me = myIdRef.current;
-      if (me) {
-        setNicknames((prev) => ({ ...prev, [me]: cleanNickname(nickname) }));
-      }
+    const me = myIdRef.current;
+    if (me) {
+      setNicknames((prev) => ({ ...prev, [me]: cleanNickname(nickname) }));
+      enqueue(announceNickname);
     }
-    // Only re-fire on actual nickname change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nickname]);
+  }, [announceNickname, enqueue, nickname]);
 
   const send = useCallback(
     (
       text: string,
       opts?: { replyTo?: ReplyRef; image?: ImageAttachment },
     ) => {
-      const client = clientRef.current;
-      const sk = senderKeyRef.current;
-      const salt = nonceSaltRef.current;
-      const me = myIdRef.current;
-      if (!client || !sk || !salt || !me) return;
-      const trimmed = text.trim();
-      if (!trimmed && !opts?.image) return;
+      enqueue(async () => {
+        const state = mlsStateRef.current;
+        const me = myIdRef.current;
+        if (!state || !me || !readyRef.current) return;
+        const trimmed = text.trim();
+        if (!trimmed && !opts?.image) return;
 
-      const payload: PlaintextPayload = {
-        nickname: nicknameRef.current,
-        text: trimmed,
-        replyTo: opts?.replyTo,
-        image: opts?.image,
-      };
+        const payload: PlaintextPayload = {
+          nickname: nicknameRef.current,
+          text: trimmed,
+          replyTo: opts?.replyTo,
+          image: opts?.image,
+        };
 
-      // Local echo. Server timestamp will be very close to this for peers.
-      pushLine({
-        kind: 'msg',
-        id: nextLineId(),
-        senderId: me,
-        nickname: payload.nickname,
-        text: payload.text,
-        ts: Date.now(),
-        mine: true,
-        replyTo: opts?.replyTo,
-        image: opts?.image,
+        pushLine({
+          kind: 'msg',
+          id: nextLineId(),
+          senderId: me,
+          nickname: payload.nickname,
+          text: payload.text,
+          ts: Date.now(),
+          mine: true,
+          replyTo: opts?.replyTo,
+          image: opts?.image,
+        });
+
+        try {
+          const result = await encryptPayload(state, payload);
+          mlsStateRef.current = result.state;
+          sendEnvelope(result.envelope);
+        } catch (e) {
+          console.warn('MLS send failed', e);
+        }
       });
-
-      const counter = counterRef.current;
-      counterRef.current = counter + 1n;
-      const envelope = buildMsgFrame(sk, salt, counter, payload);
-      client.send({ type: 'relay', envelope });
     },
-    [pushLine],
+    [enqueue, pushLine, sendEnvelope],
   );
 
   return { status, myId, members, nicknames, lines, send };

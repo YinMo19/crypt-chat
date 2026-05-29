@@ -2,9 +2,9 @@
 
 Ephemeral, end-to-end encrypted, single-binary chat rooms.
 
-- **Server is opaque.** Messages are encrypted client-side with AES-256-GCM
-  under per-sender keys distributed via X25519 ECDH. The server only relays
-  ciphertext bytes — it cannot read text, nicknames, replies, or images.
+- **Server is opaque.** Messages are encrypted client-side with MLS
+  (Messaging Layer Security, RFC 9420). The server only relays ciphertext
+  bytes — it cannot read text, nicknames, replies, or images.
 - **No database.** Rooms live in memory; when the last member leaves, the
   room is destroyed. Nothing is persisted.
 - **Single binary.** The React/Vite frontend is embedded into the Rust
@@ -15,8 +15,8 @@ Ephemeral, end-to-end encrypted, single-binary chat rooms.
 
 - Lock-free relay path: `tokio::broadcast` + `DashMap`, no `Mutex<Room>`.
   Slow clients get kicked instead of stalling the room.
-- Sender Keys protocol: O(1) AES-GCM per message regardless of room size.
-  KEY/NICK frames are distributed once at join.
+- MLS group key agreement: joins/leaves are committed by a room sponsor and
+  delivered as opaque MLS messages; application messages ride MLS epochs.
 - 16-character room IDs, server-stamped message timestamps, `@nickname`
   mentions, replies, hover-2s timestamps, virtualized message log
   (2048-line cap, ~constant DOM cost), inline code highlighting,
@@ -28,7 +28,7 @@ Ephemeral, end-to-end encrypted, single-binary chat rooms.
 | Layer    | Tech                                                          |
 | -------- | ------------------------------------------------------------- |
 | Server   | Rust, axum, tokio, DashMap, rust-embed                        |
-| Crypto   | `@noble/curves` (X25519), `@noble/ciphers` (AES-256-GCM, HKDF) |
+| Crypto   | `ts-mls` (RFC 9420 MLS), HPKE, WebCrypto                      |
 | Frontend | React 18, TypeScript, Tailwind, Vite, @tanstack/react-virtual |
 | Font     | JetBrains Mono Variable (self-hosted)                         |
 | Highlight| highlight.js (15 languages bundled)                           |
@@ -114,16 +114,16 @@ cd frontend && pnpm dev
 
 ## Architecture
 
-The server is a thin relay. Joining publishes your X25519 public key; the
-server hands every member a roster + pipes opaque ciphertext envelopes
-between them. All identity, message body, image, and nickname material
-lives inside the encrypted payload.
+The server is a thin relay. Joining publishes your MLS KeyPackage; the
+server hands every member a roster + pipes opaque MLS envelopes between
+them. All identity, message body, image, and nickname material lives inside
+the encrypted payload.
 
 ```
-client  --(Join + pubkey)-->  server
+client  --(Join + KeyPackage)-->  server
         <--(roster)----------
-        --(KEY frames per peer)-->  server  --(unicast)-->  peers
-        --(NICK / MSG broadcast)-->  server  --(broadcast)-->  peers
+        --(MLS Welcome / Commit)-->  server  --(unicast/broadcast)-->  peers
+        --(MLS application message)-->  server  --(broadcast)-->  peers
 ```
 
 The room itself is a `DashMap<String, Arc<Room>>` and a per-room

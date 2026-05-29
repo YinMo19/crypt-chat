@@ -2,7 +2,7 @@
 
 export interface MemberInfo {
   id: string;
-  /** base64 X25519 public key. */
+  /** base64 MLS KeyPackage. Kept as `public_key` for server compatibility. */
   public_key: string;
 }
 

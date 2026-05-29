@@ -11,14 +11,14 @@
   },
   "dependencies": {
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
-    "@noble/ciphers": "^1.0.0",
-    "@noble/curves": "^1.6.0",
-    "@noble/hashes": "^1.5.0",
+    "@noble/ciphers": "^2.1.1",
+    "@noble/curves": "^2.0.1",
     "@tanstack/react-virtual": "^3.13.26",
     "highlight.js": "^11.11.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.0"
+    "react-router-dom": "^6.26.0",
+    "ts-mls": "^1.6.2"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
