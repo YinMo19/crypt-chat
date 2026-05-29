@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
-use crate::protocol::{ClientMsg, MemberInfo, ServerMsg};
+use crate::protocol::{ClientMsg, MemberInfo, ServerMsg, is_valid_room_id};
 use crate::room::{BcastFrame, DIRECT_CAPACITY, Frame, MemberHandle, Room, Rooms};
 
 /// Cap an inbound text frame at this many bytes to prevent memory abuse.
@@ -72,6 +72,14 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
             return;
         }
     };
+
+    if !is_valid_room_id(&room_id) {
+        let frame = encode(&ServerMsg::Error {
+            reason: "invalid room id",
+        });
+        let _ = sender.send(Message::Text(frame.to_string())).await;
+        return;
+    }
 
     // Look up / create the room (capped). Errors → tell the client and bail.
     let room: Arc<Room> = match rooms.get_or_create(&room_id) {
@@ -208,7 +216,9 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                         let _ = direct_tx.try_send(frame);
                     }
                     Err(_) => {
-                        let frame = encode(&ServerMsg::Error { reason: "bad frame" });
+                        let frame = encode(&ServerMsg::Error {
+                            reason: "bad frame",
+                        });
                         let _ = direct_tx.try_send(frame);
                     }
                 }

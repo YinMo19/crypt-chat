@@ -38,9 +38,8 @@ export function newRoomId(): string {
  *   - strip non-alphabet chars
  *   - if shorter than 16, deterministically pad with random alphabet chars
  *     (so `foo` becomes `foo_____________` where _ is fresh randomness)
- *   - if longer than 16, keep as-is (we still treat it as a valid room id;
- *     collision with another arbitrary string of the same length is the
- *     user's problem)
+ *   - if longer than 16, truncate to 16 so every client/server room id has
+ *     the same canonical shape
  */
 export function normalizeRoomId(input: string): string {
   let s = input.toLowerCase();
@@ -49,7 +48,7 @@ export function normalizeRoomId(input: string): string {
   for (let i = 0; i < s.length; i++) {
     if (ALPHABET.includes(s[i])) cleaned += s[i];
   }
-  if (cleaned.length >= ROOM_ID_LEN) return cleaned;
+  if (cleaned.length >= ROOM_ID_LEN) return cleaned.slice(0, ROOM_ID_LEN);
   // Pad with fresh randomness, not a fixed pattern, so we don't accidentally
   // funnel everyone who types `foo` into one shared room.
   const padBytes = new Uint8Array(ROOM_ID_LEN - cleaned.length);

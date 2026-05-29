@@ -12,6 +12,13 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const ROOM_ID_LEN: usize = 16;
+const ROOM_ID_ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+
+pub fn is_valid_room_id(room: &str) -> bool {
+    room.len() == ROOM_ID_LEN && room.bytes().all(|b| ROOM_ID_ALPHABET.contains(&b))
+}
+
 /// Client → Server.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

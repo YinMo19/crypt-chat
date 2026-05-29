@@ -88,21 +88,13 @@ export function MessageInput({
     text: string,
     selStart: number,
   ): { open: boolean; query: string; range: [number, number] | null } => {
-    let i = selStart - 1;
-    while (i >= 0) {
-      const ch = text[i];
-      if (ch === '@') {
-        if (i === 0 || /\s/.test(text[i - 1])) {
-          const q = text.slice(i + 1, selStart);
-          // Allow letters/digits/_/-/CJK in nickname queries.
-          if (/^[\w一-鿿-]*$/.test(q)) {
-            return { open: true, query: q, range: [i, selStart] };
-          }
-        }
-        return { open: false, query: '', range: null };
+    const at = text.lastIndexOf('@', selStart - 1);
+    if (at >= 0 && (at === 0 || /\s/.test(text[at - 1]))) {
+      const q = text.slice(at + 1, selStart);
+      // Match the nickname alphabet: letters, digits, space, `_`, `#`.
+      if (/^[A-Za-z0-9 _#]*$/.test(q)) {
+        return { open: true, query: q, range: [at, selStart] };
       }
-      if (/\s/.test(ch)) break;
-      i--;
     }
     return { open: false, query: '', range: null };
   };
@@ -184,8 +176,7 @@ export function MessageInput({
       (a, b) => b[0].length - a[0].length,
     );
     for (const [token, id] of tokens) {
-      // Replace each occurrence; we don't bother with regex escaping
-      // because we control insertion (only nickname chars + leading @).
+      // Literal split/join means nickname characters never need regex escaping.
       out = out.split(token).join(`@${id}`);
     }
     return out;

@@ -20,6 +20,12 @@
  *     - Send our NICK directly to them. (Saves them from waiting for our
  *       next chat message before they can render us in the @ list.)
  *
+ *   On `member_left`:
+ *     - Remove them from the roster.
+ *     - Generate a fresh sender key and nonce salt, then redistribute the new
+ *       key to the remaining peers. Future messages are no longer decryptable
+ *       with keys the departed member learned while present.
+ *
  *   On incoming `message`:
  *     - kind=KEY  : unwrap and store peer.senderKey
  *     - kind=MSG  : decrypt with peer.senderKey, push line with server ts
@@ -52,6 +58,7 @@ import {
   openNickFrame,
 } from './crypto';
 import { randomBytes } from '@noble/hashes/utils';
+import { cleanNickname } from './nickname';
 import { WsClient, type MemberInfo } from './ws';
 
 export type ChatLine =
@@ -109,7 +116,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
   const nicknameRef = useRef(nickname);
 
   useEffect(() => {
-    nicknameRef.current = nickname;
+    nicknameRef.current = cleanNickname(nickname);
   }, [nickname]);
 
   const pushLine = useCallback((line: ChatLine) => {
@@ -154,6 +161,20 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     const envelope = buildNickFrame(sk, salt, counter, nicknameRef.current);
     client.send({ type: 'relay', to, envelope });
   }, []);
+
+  const rekeySender = useCallback(() => {
+    const oldKey = senderKeyRef.current;
+    const oldSalt = nonceSaltRef.current;
+    senderKeyRef.current = generateSenderKey();
+    nonceSaltRef.current = randomBytes(4);
+    counterRef.current = 0n;
+    oldKey?.fill(0);
+    oldSalt?.fill(0);
+
+    for (const peer of peersRef.current.values()) {
+      sendKeyTo(peer);
+    }
+  }, [sendKeyTo]);
 
   useEffect(() => {
     let alive = true;
@@ -227,6 +248,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
             return rest;
           });
           refreshRoster();
+          rekeySender();
           pushLine({
             kind: 'system',
             id: nextLineId(),
@@ -253,8 +275,9 @@ export function useRoom(roomId: string, nickname: string): RoomState {
           }
           if (kind === FRAME_KIND_NICK) {
             const nick = openNickFrame(peer.senderKey, msg.envelope);
-            if (nick) {
-              setNicknames((prev) => ({ ...prev, [msg.from]: nick }));
+            const cleanNick = nick ? cleanNickname(nick) : '';
+            if (cleanNick) {
+              setNicknames((prev) => ({ ...prev, [msg.from]: cleanNick }));
             }
             return;
           }
@@ -265,7 +288,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
               kind: 'msg',
               id: nextLineId(),
               senderId: msg.from,
-              nickname: payload.nickname,
+              nickname: cleanNickname(payload.nickname) || msg.from.slice(0, 6),
               text: payload.text,
               ts: msg.ts,
               mine: false,
@@ -315,7 +338,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       offClose();
       client.close();
     };
-  }, [roomId, pushLine, refreshRoster, sendKeyTo, sendNick]);
+  }, [roomId, pushLine, refreshRoster, rekeySender, sendKeyTo, sendNick]);
 
   // If our nickname changed mid-session, broadcast it again.
   useEffect(() => {
@@ -323,7 +346,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       sendNick();
       const me = myIdRef.current;
       if (me) {
-        setNicknames((prev) => ({ ...prev, [me]: nickname }));
+        setNicknames((prev) => ({ ...prev, [me]: cleanNickname(nickname) }));
       }
     }
     // Only re-fire on actual nickname change.

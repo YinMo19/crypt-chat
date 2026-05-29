@@ -5,19 +5,21 @@ import { MessageList } from '../components/MessageList';
 import { MessageInput } from '../components/MessageInput';
 import type { ChatLine } from '../lib/room';
 import type { ReplyRef } from '../lib/crypto';
-import { isValidRoomId, normalizeRoomId, ROOM_ID_LENGTH } from '../lib/roomId';
+import { cleanNickname } from '../lib/nickname';
+import { isValidRoomId, normalizeRoomId } from '../lib/roomId';
 
 export function Room() {
   const { roomId } = useParams<{ roomId: string }>();
-  const [nickname] = useState(() => sessionStorage.getItem('nickname') ?? '');
+  const [nickname] = useState(() =>
+    cleanNickname(sessionStorage.getItem('nickname') ?? ''),
+  );
 
   if (!roomId) return <Navigate to="/" replace />;
 
-  // Short / invalid room ids: pad to ROOM_ID_LENGTH and bounce back to
-  // /r/<normalized>. We don't allow short rooms — see lib/roomId.ts for
-  // why. The Navigate is `replace` so the browser back button doesn't
-  // bounce back to the un-padded URL.
-  if (!isValidRoomId(roomId) && roomId.length < ROOM_ID_LENGTH) {
+  // Non-canonical room ids bounce to /r/<normalized>. We don't allow short
+  // rooms — see lib/roomId.ts for why. The Navigate is `replace` so the
+  // browser back button doesn't bounce back to the un-padded URL.
+  if (!isValidRoomId(roomId)) {
     return <Navigate to={`/r/${normalizeRoomId(roomId)}`} replace />;
   }
 
