@@ -20,7 +20,6 @@ jobs:
         id: owner
         run: echo "value=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -46,7 +45,11 @@ jobs:
         with:
           context: .
           file: Containerfile
-          platforms: linux/amd64,linux/arm64
+          # x86_64 musl only — that's what every modern Linux server runs.
+          # If we ever need arm64 we'd add `setup-qemu-action` back and
+          # re-add it to this list, but cross-arch via QEMU roughly doubles
+          # the build wall-time so keep it single-arch by default.
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

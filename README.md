@@ -52,8 +52,8 @@ SKIP_FRONTEND_BUILD=1 cargo build --release
 
 ## Run via container
 
-A multi-arch (amd64 + arm64) image is published to GHCR on every push to
-the default branch:
+A linux/amd64 image is published to GHCR on every push to the default
+branch:
 
 ```
 ghcr.io/yinmo19/crypt-chat:latest
