@@ -44,7 +44,13 @@ export type ChatLine =
       replyTo?: ReplyRef;
       image?: ImageAttachment;
     }
-  | { kind: 'system'; id: string; text: string };
+  | {
+      kind: 'system';
+      id: string;
+      text: string;
+      memberId?: string;
+      memberName?: string;
+    };
 
 interface PeerEntry {
   id: string;
@@ -86,12 +92,14 @@ export function useRoom(roomId: string, nickname: string): RoomState {
   const [members, setMembers] = useState<MemberInfo[]>([]);
   const [nicknames, setNicknames] = useState<Record<string, string>>({});
   const [lines, setLines] = useState<ChatLine[]>([]);
+  const nicknamesRef = useRef<Record<string, string>>({});
 
   const identityRef = useRef<MlsIdentity | null>(null);
   const mlsStateRef = useRef<ClientState | null>(null);
   const peersRef = useRef<Map<string, PeerEntry>>(new Map());
   const pendingAddsRef = useRef<Map<string, PeerEntry>>(new Map());
   const pendingWelcomesRef = useRef<string[]>([]);
+  const pendingJoinLinesRef = useRef<Set<string>>(new Set());
   const clientRef = useRef<WsClient | null>(null);
   const reconnectRef = useRef<((reason: string) => void) | null>(null);
   const welcomeTimerRef = useRef<number | null>(null);
@@ -112,6 +120,43 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       return next.length > MAX ? next.slice(next.length - MAX) : next;
     });
   }, []);
+
+  const updateNicknames = useCallback(
+    (
+      updater: (
+        prev: Record<string, string>,
+      ) => Record<string, string>,
+    ) => {
+      const next = updater(nicknamesRef.current);
+      nicknamesRef.current = next;
+      setNicknames(next);
+    },
+    [],
+  );
+
+  const nameForMember = useCallback((id: string) => {
+    return cleanNickname(nicknamesRef.current[id] ?? '') || id.slice(0, 6);
+  }, []);
+
+  const pushMemberJoinedLine = useCallback(
+    (id: string, name?: string) => {
+      const nick =
+        cleanNickname(name ?? nicknamesRef.current[id] ?? '') || '';
+      if (!nick) {
+        pendingJoinLinesRef.current.add(id);
+        return;
+      }
+      pendingJoinLinesRef.current.delete(id);
+      pushLine({
+        kind: 'system',
+        id: nextLineId(),
+        memberId: id,
+        memberName: nick,
+        text: 'joined the room',
+      });
+    },
+    [pushLine],
+  );
 
   const refreshRoster = useCallback(() => {
     const me = myIdRef.current;
@@ -191,6 +236,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     peersRef.current.clear();
     pendingAddsRef.current.clear();
     pendingWelcomesRef.current = [];
+    pendingJoinLinesRef.current.clear();
     myIdRef.current = null;
     readyRef.current = false;
     setMyId(null);
@@ -311,8 +357,11 @@ export function useRoom(roomId: string, nickname: string): RoomState {
         if (processed.result?.kind === 'app') {
           const payload = processed.result.payload;
           const cleanNick = cleanNickname(payload.nickname) || from.slice(0, 6);
-          setNicknames((prev) => ({ ...prev, [from]: cleanNick }));
+          updateNicknames((prev) => ({ ...prev, [from]: cleanNick }));
           if (!payload.text && !payload.image && !payload.replyTo) {
+            if (pendingJoinLinesRef.current.has(from)) {
+              pushMemberJoinedLine(from, cleanNick);
+            }
             return;
           }
           pushLine({
@@ -337,8 +386,10 @@ export function useRoom(roomId: string, nickname: string): RoomState {
       announceNickname,
       commitPendingAdds,
       pushLine,
+      pushMemberJoinedLine,
       requestReconnect,
       tryJoinPendingWelcome,
+      updateNicknames,
     ],
   );
 
@@ -407,7 +458,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
               const wasReconnecting = connectedOnceRef.current;
               myIdRef.current = msg.your_id;
               setMyId(msg.your_id);
-              setNicknames((prev) => ({
+              updateNicknames((prev) => ({
                 ...prev,
                 [msg.your_id]: nicknameRef.current,
               }));
@@ -456,11 +507,7 @@ export function useRoom(roomId: string, nickname: string): RoomState {
                 armWelcomeTimeout();
               }
               await commitPendingAdds();
-              pushLine({
-                kind: 'system',
-                id: nextLineId(),
-                text: 'someone joined',
-              });
+              pushMemberJoinedLine(msg.id);
               break;
             }
             case 'member_left': {
@@ -478,10 +525,13 @@ export function useRoom(roomId: string, nickname: string): RoomState {
                 await commitRemove(peer);
               }
               await commitPendingAdds();
+              pendingJoinLinesRef.current.delete(msg.id);
               pushLine({
                 kind: 'system',
                 id: nextLineId(),
-                text: 'someone left',
+                memberId: msg.id,
+                memberName: nameForMember(msg.id),
+                text: 'left the room',
               });
               break;
             }
@@ -551,16 +601,19 @@ export function useRoom(roomId: string, nickname: string): RoomState {
     isSponsor,
     processMlsEnvelope,
     pushLine,
+    pushMemberJoinedLine,
     refreshRoster,
     resetCryptoForJoin,
     roomId,
     enqueue,
+    nameForMember,
+    updateNicknames,
   ]);
 
   useEffect(() => {
     const me = myIdRef.current;
     if (me) {
-      setNicknames((prev) => ({ ...prev, [me]: cleanNickname(nickname) }));
+      updateNicknames((prev) => ({ ...prev, [me]: cleanNickname(nickname) }));
       enqueue(announceNickname);
     }
   }, [announceNickname, enqueue, nickname]);

@@ -237,6 +237,16 @@ function Row({
   const timerRef = useRef<number | null>(null);
 
   if (line.kind === 'system') {
+    if (line.memberId && line.memberName) {
+      return (
+        <div className="italic text-neutral-500 py-0.5">
+          <span style={{ color: colorFor(line.memberId) }}>
+            {line.memberName}
+          </span>
+          <span> {line.text}</span>
+        </div>
+      );
+    }
     return <div className="italic text-neutral-500 py-0.5">{line.text}</div>;
   }
 
