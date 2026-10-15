@@ -209,7 +209,6 @@ impl Rooms {
             // remove_if guards against a fresh joiner racing in between.
             self.inner.remove_if(room_id, |_, room| room.population() == 0);
             self.total_rooms.fetch_sub(1, Ordering::AcqRel);
-            tracing::info!(room = %room_id, "room dropped");
         }
     }
 }

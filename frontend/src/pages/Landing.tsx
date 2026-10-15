@@ -3,23 +3,21 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { cleanNickname, NICKNAME_MAX_LENGTH, normalizeNickname } from '../lib/nickname';
 import { newRoomId, normalizeRoomId, ROOM_ID_LENGTH } from '../lib/roomId';
 
-export function Landing() {
+export function Landing({ onEnter }: { onEnter: (nickname: string) => void }) {
   const navigate = useNavigate();
   const location = useLocation();
   // When redirected back from /r/:roomId without a nickname, the route
   // passes the original room id along so we can pre-fill the form.
   const prefill =
     (location.state as { prefillRoom?: string } | null)?.prefillRoom ?? '';
-  const [nickname, setNickname] = useState(() =>
-    normalizeNickname(sessionStorage.getItem('nickname') ?? ''),
-  );
+  const [nickname, setNickname] = useState('');
   const [roomId, setRoomId] = useState(prefill);
 
   const enter = (e: FormEvent) => {
     e.preventDefault();
     const nick = cleanNickname(nickname);
     if (!nick) return;
-    sessionStorage.setItem('nickname', nick);
+    onEnter(nick);
     const trimmed = roomId.trim();
     const room = trimmed ? normalizeRoomId(trimmed) : newRoomId();
     navigate(`/r/${encodeURIComponent(room)}`);
@@ -33,12 +31,16 @@ export function Landing() {
           <p className="text-sm text-neutral-400">
             ephemeral end-to-end encrypted rooms. server can't read anything.
           </p>
+          <p className="text-xs text-neutral-400">
+            No saved history. Reloading or leaving this page discards your chat.
+          </p>
         </div>
 
         <label className="block">
           <span className="text-xs uppercase tracking-wider text-neutral-400">nickname</span>
           <input
             autoFocus
+            autoComplete="off"
             value={nickname}
             onChange={(e) => setNickname(normalizeNickname(e.target.value))}
             className="mt-1 w-full border-b border-neutral-700 bg-transparent py-1 text-base focus:border-neutral-100"

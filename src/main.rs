@@ -6,8 +6,6 @@ mod ws;
 use axum::Router;
 use axum::routing::get;
 use clap::Parser;
-use tower_http::trace::TraceLayer;
-use tracing_subscriber::EnvFilter;
 
 use crate::room::Rooms;
 
@@ -25,26 +23,18 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
     let args = Args::parse();
     let rooms = Rooms::new();
 
     let app = Router::new()
         .route("/ws", get(ws::ws_handler))
         .fallback(assets::static_handler)
-        .with_state(rooms)
-        .layer(TraceLayer::new_for_http());
+        .with_state(rooms);
 
     let bind = format!("{}:{}", args.addr, args.port);
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .expect("failed to bind");
 
-    tracing::info!("crypt-chat listening on http://{bind}");
     axum::serve(listener, app).await.expect("serve failed");
 }

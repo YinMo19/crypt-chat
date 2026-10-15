@@ -132,8 +132,6 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
     }));
     room.broadcast(Some(my_id), joined_announce);
 
-    tracing::info!(room = %room_id, member = %my_id, "joined");
-
     // Writer task: pump direct frames + broadcast frames to the WS in order.
     // Lagging on the broadcast channel kicks us — better than stalling the
     // room with backpressure.
@@ -162,14 +160,7 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
                                 break;
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(
-                                member = %writer_my_id,
-                                lagged = n,
-                                "client lagged, dropping"
-                            );
-                            break;
-                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => break,
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -236,7 +227,6 @@ async fn handle_socket(socket: WebSocket, rooms: Rooms) {
         // writer is about to abort anyway).
         room.broadcast(Some(my_id), frame);
     }
-    tracing::info!(room = %room_id, member = %my_id, "left");
 
     writer.abort();
 }

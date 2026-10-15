@@ -10,7 +10,6 @@
  * The hook owns:
  *   - the WebSocket lifecycle (connect / reconnect with backoff),
  *   - React state (lines / nicknames / members / status),
- *   - the IndexedDB cache (async hydrate, debounced persist),
  *   - an MLS task queue so welcome / add / remove / encrypt happen in order.
  *
  * It delegates all MLS protocol work to `MlsSession`.
@@ -24,7 +23,6 @@ import {
   identityForKeyPackage,
 } from '../mls';
 import { cleanNickname } from '../nickname';
-import { loadRoomCache, saveRoomCache } from '../roomCache';
 import { WsClient, type MemberInfo } from '../ws';
 import { MlsSession, type SessionCallbacks } from './session';
 import type { ChatLine, PeerEntry, RoomState } from './types';
@@ -60,51 +58,10 @@ export function useRoom(roomId: string, nickname: string): RoomState {
   const reconnectRef = useRef<((reason: string) => void) | null>(null);
   const connectedOnceRef = useRef(false);
   const queueRef = useRef(Promise.resolve());
-  const cacheStateRef = useRef({ lines, nicknames });
 
   useEffect(() => {
     nicknameRef.current = cleanNickname(nickname);
   }, [nickname]);
-
-  // Async hydration from IndexedDB. If live messages have already arrived
-  // by the time the cache loads, the cache is stale by definition — drop
-  // it rather than racing with the live state.
-  useEffect(() => {
-    let alive = true;
-    void loadRoomCache(roomId).then((cached) => {
-      if (!alive || !cached) return;
-      setLines((prev) => (prev.length === 0 ? cached.lines : prev));
-      setNicknames((prev) => {
-        if (Object.keys(prev).length > 0) return prev;
-        nicknamesRef.current = cached.nicknames;
-        return cached.nicknames;
-      });
-    });
-    return () => {
-      alive = false;
-    };
-  }, [roomId]);
-
-  useEffect(() => {
-    cacheStateRef.current = { lines, nicknames };
-    const timer = window.setTimeout(() => {
-      void saveRoomCache(roomId, lines, nicknames);
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [lines, nicknames, roomId]);
-
-  useEffect(() => {
-    return () => {
-      // Fire-and-forget on unmount. IndexedDB queues the write at request
-      // time, so the put survives the React teardown even though we don't
-      // await it.
-      void saveRoomCache(
-        roomId,
-        cacheStateRef.current.lines,
-        cacheStateRef.current.nicknames,
-      );
-    };
-  }, [roomId]);
 
   const pushLine = useCallback((line: ChatLine) => {
     setLines((prev) => {

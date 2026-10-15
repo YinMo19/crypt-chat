@@ -5,10 +5,9 @@ import { MessageList } from '../components/MessageList';
 import { MessageInput } from '../components/MessageInput';
 import type { ChatLine } from '../lib/room';
 import type { ReplyRef } from '../lib/crypto';
-import { cleanNickname } from '../lib/nickname';
 import { isValidRoomId, normalizeRoomId } from '../lib/roomId';
 
-export function Room() {
+export function Room({ nickname }: { nickname: string }) {
   const { roomId } = useParams<{ roomId: string }>();
 
   // Route-level early exits BEFORE any hook so that future additions can't
@@ -21,14 +20,6 @@ export function Room() {
   if (!isValidRoomId(roomId)) {
     return <Navigate to={`/r/${normalizeRoomId(roomId)}`} replace />;
   }
-
-  return <RoomGate roomId={roomId} />;
-}
-
-function RoomGate({ roomId }: { roomId: string }) {
-  const [nickname] = useState(() =>
-    cleanNickname(sessionStorage.getItem('nickname') ?? ''),
-  );
 
   // No nickname: redirect to landing with the room id in router state.
   if (!nickname)

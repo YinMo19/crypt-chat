@@ -5,8 +5,9 @@ Ephemeral, end-to-end encrypted, single-binary chat rooms.
 - **Server is opaque.** Messages are encrypted client-side with MLS
   (Messaging Layer Security, RFC 9420). The server only relays ciphertext
   bytes — it cannot read text, nicknames, replies, or images.
-- **No database.** Rooms live in memory; when the last member leaves, the
-  room is destroyed. Nothing is persisted.
+- **No chat database.** Rooms live in server memory; when the last member's
+  disconnection is detected, the room is destroyed. Chat content is not
+  persisted by the server or browser.
 - **Single binary.** The React/Vite frontend is embedded into the Rust
   binary at build time via [`rust-embed`](https://crates.io/crates/rust-embed).
   Deploying is `scp` the binary, run it.
@@ -32,6 +33,30 @@ Ephemeral, end-to-end encrypted, single-binary chat rooms.
 | Frontend | React 18, TypeScript, Tailwind, Vite, @tanstack/react-virtual |
 | Font     | JetBrains Mono Variable (self-hosted)                         |
 | Highlight| highlight.js (15 languages bundled)                           |
+
+## Privacy and retention
+
+Messages, images, nicknames, and MLS state remain only in the current page's
+memory. Reloading, leaving, or closing the page discards its conversation;
+rejoining the same room does not restore earlier messages. Temporary network
+reconnects while the page stays open retain the current in-memory view.
+
+On startup, the app deletes the old `crypt-chat` IndexedDB database and the
+old `sessionStorage` nickname before allowing chat. If an older tab blocks
+deletion, close the other tabs; the page waits and displays instructions.
+If deletion fails, clear the site's data in browser settings and reload.
+Older installations are only cleaned when that browser visits the new version.
+
+The app unmounts on page departure and reloads when restored from the browser's
+back/forward cache. It cannot erase browser URL history, screenshots, copies
+saved by participants, or OS/browser forensic remnants.
+
+The server does not initialize a logging subscriber or emit request, room,
+member, or lifecycle logs. On arcapi, systemd discards application stdout
+and stderr; Caddy discards this site's access and HTTP request error logs.
+System service-management, SSH, and Caddy certificate-management logs are
+separate and remain enabled. Historical journal entries from older versions
+are not erased by this change.
 
 ## Build from source
 
@@ -99,6 +124,80 @@ reverse proxy works; the WebSocket endpoint is `/ws`. Caddy example:
 chat.example.com {
     reverse_proxy 127.0.0.1:8080
 }
+```
+
+## Deployment on arcapi
+
+Production URL: https://enchat.yinmo.site
+
+- Host: `ssh arcapi` (Linux x86_64).
+- Binary: `/opt/crypt-chat/crypt-chat`, with the frontend embedded.
+- Service: `/etc/systemd/system/crypt-chat.service`, enabled at boot.
+  Runs as a systemd dynamic user, with a read-only filesystem and
+  `Restart=on-failure`, `StandardOutput=null`, `StandardError=null`, and
+  `LimitCORE=0`. Application error output is unavailable for troubleshooting.
+- Listener: `127.0.0.1:8088`; not exposed directly to the network.
+- Caddy: `/etc/caddy/conf.d/crypt-chat.caddy`, imported by the existing
+  `/etc/caddy/Caddyfile`:
+
+```caddyfile
+enchat.yinmo.site {
+    log enchat {
+        output discard
+    }
+    reverse_proxy 127.0.0.1:8088
+    encode zstd gzip
+}
+```
+
+The global block at the start of `/etc/caddy/Caddyfile` keeps request error
+logs out of the shared default logger without silencing other sites:
+
+```caddyfile
+{
+    log default {
+        exclude http.log.access.enchat http.log.error.enchat
+    }
+    log enchat_errors {
+        include http.log.error.enchat
+        output discard
+    }
+}
+```
+
+Cloudflare DNS has a DNS-only A record pointing to `8.134.183.80`, with no
+AAAA record. Caddy handles certificates and HTTP-to-HTTPS redirects using
+the host's existing ACME proxy setup. Local DNS credentials are in
+`~/.ddns/cloudflare.ini`; never copy them into the repository or binary.
+
+Build and update from the repository root (requires Zig, `cargo-zigbuild`,
+and the `x86_64-unknown-linux-musl` Rust target):
+
+```bash
+pnpm --dir frontend install --frozen-lockfile
+cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
+scp target/x86_64-unknown-linux-musl/release/crypt-chat \
+    arcapi:/opt/crypt-chat/crypt-chat.new
+ssh arcapi 'chmod 0755 /opt/crypt-chat/crypt-chat.new &&
+    mv /opt/crypt-chat/crypt-chat.new /opt/crypt-chat/crypt-chat &&
+    systemctl restart crypt-chat'
+```
+
+Do not overwrite the running executable in place. Restarting drops all
+in-memory rooms and disconnects their clients; there is no database to
+migrate or restore.
+
+```bash
+ssh arcapi 'systemctl status crypt-chat --no-pager'
+ssh arcapi 'systemctl show crypt-chat -p StandardOutput -p StandardError'
+curl --fail --head https://enchat.yinmo.site/
+```
+
+After changing Caddy configuration, validate before reloading:
+
+```bash
+ssh arcapi 'caddy validate --config /etc/caddy/Caddyfile &&
+    systemctl reload caddy'
 ```
 
 ## Development
